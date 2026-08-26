@@ -8,12 +8,13 @@ not contain a determined adversary with arbitrary-code execution.
 
 ## Status note
 
-The extension overrides the built-in `bash` tool to add an optional agent-supplied
-`explanation` parameter, displayed in gate prompts and tool cards. It is
-**advisory only**: commands are never blocked for omitting it. Because tool
-registration is last-write-wins across extensions and other packages may also
-override `bash`, the gates re-assert ownership on `session_start` and before
-each agent turn.
+The extension overrides the built-in `bash` tool to add a required agent-supplied
+`explanation` parameter, displayed in gate prompts and tool cards. Risky commands
+without it are rejected with a retry hint — **but only while gates owns the bash
+tool schema**. If another package strips the field, the requirement is dropped
+instead of deadlocking every risky command. Because tool registration is
+last-write-wins across extensions, the gates re-assert ownership on
+`session_start` and before each agent turn.
 
 ## Threat model
 
