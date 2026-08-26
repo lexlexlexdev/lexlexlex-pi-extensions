@@ -8,12 +8,12 @@ not contain a determined adversary with arbitrary-code execution.
 
 ## Status note
 
-An earlier iteration overrode the built-in `bash` tool to add an agent-supplied
-`explanation` parameter (shown in gate prompts, blocked-if-missing). It was
-**removed**: tool registration is last-write-wins across extensions, and other
-installed packages that also override `bash` raced for ownership, making the
-field unreliable and occasionally deadlocking risky commands. The hardened
-command matching developed alongside it was kept.
+The extension overrides the built-in `bash` tool to add an optional agent-supplied
+`explanation` parameter, displayed in gate prompts and tool cards. It is
+**advisory only**: commands are never blocked for omitting it. Because tool
+registration is last-write-wins across extensions and other packages may also
+override `bash`, the gates re-assert ownership on `session_start` and before
+each agent turn.
 
 ## Threat model
 
