@@ -353,10 +353,32 @@ export default function permissionGates(pi: ExtensionAPI) {
     },
   });
 
+  /** True when OUR enhanced bash is the currently registered definition. */
+  function bashIsOurs(): boolean {
+    const bash = pi.getAllTools().find((tool) => tool.name === 'bash');
+    return Boolean(bash && (bash.sourceInfo?.source ?? '').includes('permission-gates'));
+  }
+
+  /**
+   * Self-healing ownership: other extensions (e.g. pi-code-previews) may load
+   * AFTER us and re-register bash with the plain builtin schema, wiping the
+   * explanation parameter. Re-assert whenever bash isn't ours. Registration
+   * order between extensions is racy, so we hook both session_start (early)
+   * and before_agent_start (fires after every extension has loaded).
+   */
+  function ensureEnhancedBash(ctx: ExtensionContext): void {
+    if (bashIsOurs()) return;
+    registerEnhancedBash(ctx);
+  }
+
   pi.on('session_start', (_event, ctx) => {
     loadedSessionId = undefined;
     ensureSession(ctx);
-    registerEnhancedBash(ctx);
+    ensureEnhancedBash(ctx);
+  });
+
+  pi.on('before_agent_start', (_event, ctx) => {
+    ensureEnhancedBash(ctx);
   });
 
   pi.on('tool_call', async (event, ctx): Promise<ToolCallEventResult | void> => {
