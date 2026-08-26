@@ -4,11 +4,19 @@
  * Extracted from lexlexlex-tool-render.ts so that permission-gates (which owns
  * the overridden `bash` tool) and tool-render (which owns the other built-ins)
  * can attach the exact same card UI without duplicating code.
+ *
+ * This file is a LIBRARY, not an extension. pi auto-discovers top-level *.ts
+ * files here, so the no-op default export below exists only to satisfy the
+ * loader's "must export a factory" requirement.
  */
 
 import type { AgentToolResult, Theme, ToolRenderContext, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { isAbsolute, relative } from "node:path";
+
+export default function lexlexlexToolCards() {
+	// Library-only module; loaded by other extensions via named imports.
+}
 
 export type CardToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
 
