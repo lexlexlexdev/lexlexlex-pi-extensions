@@ -12,15 +12,16 @@ const ALLOW_ONCE_LABEL = 'Allow once';
 const BLOCK_LABEL = 'Block';
 
 const EXPLANATION_FALLBACK = '(no explanation provided)';
+const EXPLANATION_REQUIRED_REASON = 'Explanation required: retry this exact command with an `explanation` field — one or two short sentences on what it does and why it is needed.';
 
 const BASH_SCHEMA = Type.Object({
   command: Type.String({ description: 'The bash command to execute' }),
   timeout: Type.Optional(Type.Number({ description: 'Optional timeout in milliseconds' })),
-  // Advisory only: shown to the user in gate prompts and tool cards. Never
-  // blocks — the model may omit it (schema ownership races with other
-  // extensions that also override bash).
+  // Mandatory for the model (risky commands without it are rejected while we
+  // own this schema), advisory for the gate: if another extension owns the
+  // schema and strips this field, commands are allowed through unblocked.
   explanation: Type.Optional(Type.String({
-    description: 'When practical: one or two sentences describing what this command does and why it is needed. Shown to the user before any risky command runs.',
+    description: 'REQUIRED: one or two short sentences describing what this command does and why it is needed. Shown to the user before any risky command runs.',
   })),
 });
 
@@ -252,6 +253,10 @@ export default function permissionGates(pi: ExtensionAPI) {
     updateStatus(ctx, mode);
   }
 
+  function hasExplanation(input: Record<string, unknown>): boolean {
+    return typeof input.explanation === 'string' && input.explanation.trim().length > 0;
+  }
+
   /** True when OUR enhanced bash is the currently registered definition. */
   function bashIsOurs(): boolean {
     const bash = pi.getAllTools().find((tool) => tool.name === 'bash');
@@ -279,7 +284,7 @@ export default function permissionGates(pi: ExtensionAPI) {
       parameters: BASH_SCHEMA,
       promptGuidelines: [
         ...((base as { promptGuidelines?: readonly string[] }).promptGuidelines ?? []),
-        'When available, include the `explanation` parameter: one or two sentences describing what the command does and why it is needed.',
+        'ALWAYS include the `explanation` parameter on every call: one or two short sentences describing what the command does and why it is needed. Risky commands without it are rejected.',
       ],
       async execute(toolCallId: string, params: { command: string; timeout?: number; explanation?: string }, signal?: AbortSignal, onUpdate?: never) {
         const { explanation: _explanation, ...input } = params;
@@ -391,6 +396,12 @@ export default function permissionGates(pi: ExtensionAPI) {
 
       const risk = collectRisks(subjects);
       if (!risk) return;
+      // Demand an explanation only while WE own the schema (i.e. the model
+      // can actually provide it). If another extension stripped the field,
+      // demanding it would deadlock every risky command.
+      if (!hasExplanation(event.input as Record<string, unknown>) && bashIsOurs()) {
+        return { block: true, reason: EXPLANATION_REQUIRED_REASON };
+      }
       if (mode === 'full') return;
       if (risk.sessionAllowance && sessionAllowances.has(risk.sessionAllowance)) return;
 
