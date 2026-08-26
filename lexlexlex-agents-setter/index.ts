@@ -32,6 +32,7 @@ interface AgentOverride {
 	defaultContext?: "fresh" | "fork";
 	disabled?: boolean;
 	fallbackModels?: string[];
+	fast?: boolean;
 }
 
 interface AgentOverrides {
@@ -138,7 +139,14 @@ const DESCRIPTIONS: Record<string, string> = {
 	inheritProjectContext: "Include project context (AGENTS.md, skills, settings).",
 	defaultContext: "fresh = clean start, fork = inherit parent history.",
 	fallbackModels: "Comma-separated backups if primary model fails.",
+	fast: "Priority tier for native Codex models (gpt-5.6-luna/sol). Higher quota/cost.",
 };
+
+const FAST_ALLOWLIST = new Set(["gpt-5.6-luna", "gpt-5.6-sol"]);
+
+function isFastEligible(provider: string | undefined, id: string): boolean {
+	return (provider ?? "") === "openai-codex" && FAST_ALLOWLIST.has(id);
+}
 
 // ── Main UI Component ──────────────────────────────────────────────────────
 
@@ -284,6 +292,10 @@ class AgentsTUI implements Focusable {
 				this.editConfig.disabled = !(this.editConfig.disabled ?? false);
 				return;
 			}
+			if (f.key === "fast") {
+				this.editConfig.fast = !(this.editConfig.fast ?? false);
+				return;
+			}
 			// Confirm and save this agent's config
 			this.commitConfig();
 			return;
@@ -295,6 +307,7 @@ class AgentsTUI implements Focusable {
 			if (f.type === "toggle") {
 				if (f.key === "disabled") this.editConfig.disabled = !(this.editConfig.disabled ?? false);
 				if (f.key === "inheritProjectContext") this.editConfig.inheritProjectContext = !(this.editConfig.inheritProjectContext ?? false);
+				if (f.key === "fast") this.editConfig.fast = !(this.editConfig.fast ?? false);
 			}
 			return;
 		}
@@ -430,6 +443,7 @@ class AgentsTUI implements Focusable {
 		if (!c.thinking) delete c.thinking;
 		if (!c.defaultContext) delete c.defaultContext;
 		if (!c.fallbackModels || c.fallbackModels.length === 0) delete c.fallbackModels;
+	if (!c.fast) delete c.fast;
 		if (c.inheritProjectContext === false) delete c.inheritProjectContext;
 		if (c.disabled === false) delete c.disabled;
 
@@ -460,6 +474,7 @@ class AgentsTUI implements Focusable {
 			{ key: "_name", label: "Agent Name", type: "text" },
 			{ key: "disabled", label: "Disabled", type: "toggle" },
 			{ key: "model", label: "Model", type: "model" },
+			{ key: "fast", label: "Fast Mode", type: "toggle" },
 			{ key: "thinking", label: "Thinking", type: "select" },
 			{ key: "inheritProjectContext", label: "Inherit Project Context", type: "toggle" },
 			{ key: "defaultContext", label: "Default Context", type: "select" },
@@ -510,7 +525,7 @@ class AgentsTUI implements Focusable {
 		rows.push(r(` ${th.fg("dim", "Dashboard · Enter detail · p preview/apply · d delete · q exit")}`));
 		rows.push(r(""));
 
-		rows.push(r(` ${th.fg("dim", "D Agent           Model                       T i d")}`));
+		rows.push(r(` ${th.fg("dim", "D Agent           Model                       T i d F")}`));
 		rows.push(r(` ${th.fg("dim", "─".repeat(Math.max(1, iw - 2)))}`));
 
 		const maxRows = 12;
@@ -531,8 +546,9 @@ class AgentsTUI implements Focusable {
 			const thinkS = ov?.thinking ? th.fg("accent", trun(ov.thinking, 5)) : th.fg("dim", "·");
 			const inhS = ov?.inheritProjectContext ? th.fg("success", "✓") : th.fg("dim", "·");
 			const dcS = ov?.defaultContext === "fork" ? th.fg("accent", "F") : ov?.defaultContext === "fresh" ? "f" : th.fg("dim", "·");
+			const fastS = ov?.fast ? th.fg("warning", "⚡") : th.fg("dim", "·");
 
-			rows.push(r(`${selM}${disM} ${pad(`${nStr}${tag}`, 16)} ${pad(modelS, 27)} ${pad(thinkS, 5)} ${inhS} ${dcS}`));
+			rows.push(r(`${selM}${disM} ${pad(`${nStr}${tag}`, 16)} ${pad(modelS, 27)} ${pad(thinkS, 5)} ${inhS} ${dcS} ${fastS}`));
 		}
 
 		if (this.agentNames.length > maxRows) {
@@ -569,6 +585,7 @@ class AgentsTUI implements Focusable {
 			if (f.key === "_name") val = this.editAgent + (sel ? th.fg("accent", "█") : "");
 			else if (f.key === "disabled") val = this.editConfig.disabled ? th.fg("error", "disabled") : th.fg("success", "enabled");
 			else if (f.key === "model") val = this.editConfig.model ? trun(String(this.editConfig.model), 34) : th.fg("dim", "(inherit)");
+			else if (f.key === "fast") val = this.editConfig.fast ? th.fg("warning", "⚡ on") : th.fg("dim", "off");
 			else if (f.key === "thinking") val = THINKING_LEVELS.find((l) => l.value === this.editConfig.thinking)?.label ?? "(inherit)";
 			else if (f.key === "inheritProjectContext") val = this.editConfig.inheritProjectContext ? "yes" : "no";
 			else if (f.key === "defaultContext") val = DEFAULT_CONTEXT_OPTIONS.find((o) => o.value === (this.editConfig.defaultContext ?? ""))?.label ?? "(inherit)";
@@ -614,8 +631,9 @@ class AgentsTUI implements Focusable {
 			const m = models[i]!;
 			const sel = i === this.selModel;
 			const p = sel ? th.fg("accent", "▶") : " ";
-			const label = sel ? th.fg("accent", trun(`${m.provider}/${m.id}`, iw - 4)) : trun(`${m.provider}/${m.id}`, iw - 4);
-			rows.push(r(` ${p} ${label}`));
+			const fastM = isFastEligible(m.provider, m.id) ? th.fg("warning", "⚡ ") : "  ";
+			const label = sel ? th.fg("accent", trun(`${m.provider}/${m.id}`, iw - 6)) : trun(`${m.provider}/${m.id}`, iw - 6);
+			rows.push(r(` ${p}${fastM}${label}`));
 		}
 		if (models.length > maxShow) {
 			rows.push(r(` ${th.fg("dim", `Showing ${start + 1}-${end} of ${models.length}`)}`));
