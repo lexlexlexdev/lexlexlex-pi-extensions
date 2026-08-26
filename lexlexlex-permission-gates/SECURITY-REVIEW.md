@@ -1,11 +1,19 @@
 # Security Review — `@lexlexlex/permission-gates`
 
-Reviewed: `index.ts` (post explanation-gate feature), plus interplay with
-`lexlexlex-tool-cards.ts` / `lexlexlex-tool-render.ts`.
+Reviewed: `index.ts`, plus interplay with `lexlexlex-tool-render.ts`.
 Scope: the extension's own gate logic. **This is a guardrail, not a sandbox** —
 the agent's process can always touch whatever the user can. The gates defend
 against *accidents* and raise friction for *prompt-injected* actions; they do
 not contain a determined adversary with arbitrary-code execution.
+
+## Status note
+
+An earlier iteration overrode the built-in `bash` tool to add an agent-supplied
+`explanation` parameter (shown in gate prompts, blocked-if-missing). It was
+**removed**: tool registration is last-write-wins across extensions, and other
+installed packages that also override `bash` raced for ownership, making the
+field unreliable and occasionally deadlocking risky commands. The hardened
+command matching developed alongside it was kept.
 
 ## Threat model
 
