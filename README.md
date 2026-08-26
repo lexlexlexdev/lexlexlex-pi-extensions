@@ -28,9 +28,9 @@ Clone and point your pi settings at the folders/files, e.g. in `~/.pi/agent/sett
 ## Notes
 
 - `permission-gates` is a guardrail against accidents, not a sandbox.
-- `permission-gates` overrides the built-in `bash` tool to carry an optional
-  agent-supplied `explanation` (displayed in gate prompts and tool cards).
-  It is advisory only — commands are never blocked for omitting it. Tool
-  registration is last-write-wins across extensions; gates re-asserts bash
-  ownership on session start and before each turn so other bash-overriding
-  packages can't permanently drop the field.
+- `permission-gates` overrides the built-in `bash` tool to carry a required
+  agent-supplied `explanation` (shown in gate prompts and tool cards). Risky
+  commands without it are rejected with a retry hint — but only while gates
+  owns the bash schema; if another package stripped the field, commands pass
+  unblocked (no deadlock). Gates re-asserts ownership on session start and
+  before each turn.
