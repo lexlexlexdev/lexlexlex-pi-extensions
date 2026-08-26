@@ -1,8 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolCallEventResult, UserBashEventResult } from '@earendil-works/pi-coding-agent';
-import { createBashTool, getSettingsListTheme, isToolCallEventType } from '@earendil-works/pi-coding-agent';
+import { getSettingsListTheme, isToolCallEventType } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList, Text } from '@earendil-works/pi-tui';
-import { Type } from 'typebox';
-import { cardRenderCall, cardRenderResult } from '../lexlexlex-tool-cards.ts';
 
 const MAC_SOUND_FILE = '/Users/aveaxii/.pi/agent/sounds/ping-sound.mp3';
 const ENTRY_TYPE = 'permission-gates';
@@ -10,17 +8,6 @@ const ENTRY_TYPE = 'permission-gates';
 const SESSION_ALLOW_LABEL = 'Allow by default for this session';
 const ALLOW_ONCE_LABEL = 'Allow once';
 const BLOCK_LABEL = 'Block';
-
-const EXPLANATION_REQUIRED_REASON = 'Explanation required: retry this exact command with an `explanation` field — one or two sentences on what it does and why it is needed.';
-const EXPLANATION_FALLBACK = '(no explanation provided)';
-
-const BASH_SCHEMA = Type.Object({
-  command: Type.String({ description: 'The bash command to execute' }),
-  timeout: Type.Optional(Type.Number({ description: 'Optional timeout in milliseconds' })),
-  explanation: Type.Optional(Type.String({
-    description: 'Required in practice: one or two sentences describing what this command does and why it is needed. Shown to the user before any risky command runs.',
-  })),
-});
 
 type GateMode = 'safe' | 'full';
 type SessionAllowance = 'sensitive-read' | 'dangerous-delete' | 'git-mutation';
@@ -191,16 +178,14 @@ async function confirmRisk(
   ctx: ExtensionContext,
   risk: RiskPattern,
   subject: string,
-  explanation?: string,
 ): Promise<{ block: true; reason: string } | { rememberSession: true } | undefined> {
   if (!ctx.hasUI) return { block: true, reason: `Blocked: ${risk.label} (no UI confirmation available)` };
 
   playPermissionGateSound(pi);
-  const why = `Why: ${explanation?.trim() || EXPLANATION_FALLBACK}\n\n`;
 
   if (risk.sessionAllowance) {
     const choice = await ctx.ui.select(
-      `${risk.level === 'high' ? 'High-risk action' : 'Confirm action'}\n\nReason: ${risk.label}\n\n${why}Target:\n${subject}\n\nChoose how to proceed.`,
+      `${risk.level === 'high' ? 'High-risk action' : 'Confirm action'}\n\nReason: ${risk.label}\n\nTarget:\n${subject}\n\nChoose how to proceed.`,
       [ALLOW_ONCE_LABEL, BLOCK_LABEL, SESSION_ALLOW_LABEL],
     );
 
@@ -215,7 +200,7 @@ async function confirmRisk(
 
   const ok = await ctx.ui.confirm(
     risk.level === 'high' ? 'High-risk action' : 'Confirm action',
-    `Reason: ${risk.label}\n\n${why}Target:\n${subject}\n\nProceed?`,
+    `Reason: ${risk.label}\n\nTarget:\n${subject}\n\nProceed?`,
   );
   if (!ok) return { block: true, reason: `Blocked: ${risk.label}` };
   return;
@@ -248,29 +233,6 @@ export default function permissionGates(pi: ExtensionAPI) {
     mode = restored.mode;
     sessionAllowances = restored.allowances;
     updateStatus(ctx, mode);
-  }
-
-  function hasExplanation(input: Record<string, unknown>): boolean {
-    return typeof input.explanation === 'string' && input.explanation.trim().length > 0;
-  }
-
-  function registerEnhancedBash(ctx: ExtensionContext): void {
-    const base = createBashTool(ctx.cwd);
-    pi.registerTool({
-      ...base,
-      name: 'bash',
-      parameters: BASH_SCHEMA,
-      promptGuidelines: [
-        ...((base as { promptGuidelines?: readonly string[] }).promptGuidelines ?? []),
-        'ALWAYS include the `explanation` parameter: one or two sentences describing what the command does and why it is needed. Risky commands without an explanation are rejected.',
-      ],
-      async execute(toolCallId: string, params: { command: string; timeout?: number; explanation?: string }, signal?: AbortSignal, onUpdate?: never) {
-        const { explanation: _explanation, ...input } = params;
-        return base.execute(toolCallId, input, signal, onUpdate);
-      },
-      renderCall: (args: unknown, theme: unknown, context: unknown) => cardRenderCall('bash', args, theme, context),
-      renderResult: (result: unknown, options: unknown, theme: unknown, context: unknown) => cardRenderResult('bash', result, options, theme, context),
-    });
   }
 
   function setMode(ctx: ExtensionContext, nextMode: GateMode): void {
@@ -353,32 +315,9 @@ export default function permissionGates(pi: ExtensionAPI) {
     },
   });
 
-  /** True when OUR enhanced bash is the currently registered definition. */
-  function bashIsOurs(): boolean {
-    const bash = pi.getAllTools().find((tool) => tool.name === 'bash');
-    return Boolean(bash && (bash.sourceInfo?.source ?? '').includes('permission-gates'));
-  }
-
-  /**
-   * Self-healing ownership: other extensions (e.g. pi-code-previews) may load
-   * AFTER us and re-register bash with the plain builtin schema, wiping the
-   * explanation parameter. Re-assert whenever bash isn't ours. Registration
-   * order between extensions is racy, so we hook both session_start (early)
-   * and before_agent_start (fires after every extension has loaded).
-   */
-  function ensureEnhancedBash(ctx: ExtensionContext): void {
-    if (bashIsOurs()) return;
-    registerEnhancedBash(ctx);
-  }
-
   pi.on('session_start', (_event, ctx) => {
     loadedSessionId = undefined;
     ensureSession(ctx);
-    ensureEnhancedBash(ctx);
-  });
-
-  pi.on('before_agent_start', (_event, ctx) => {
-    ensureEnhancedBash(ctx);
   });
 
   pi.on('tool_call', async (event, ctx): Promise<ToolCallEventResult | void> => {
@@ -392,16 +331,10 @@ export default function permissionGates(pi: ExtensionAPI) {
 
       const risk = collectRisks(subjects);
       if (!risk) return;
-      if (!hasExplanation(event.input as Record<string, unknown>)) {
-        // Enforced in every mode: the reason replaces nothing but keeps an
-        // audit trail — prompts may be skipped (full mode / allowances),
-        // a stated reason never is.
-        return { block: true, reason: EXPLANATION_REQUIRED_REASON };
-      }
       if (mode === 'full') return;
       if (risk.sessionAllowance && sessionAllowances.has(risk.sessionAllowance)) return;
 
-      const result = await confirmRisk(pi, ctx, risk, cmd, event.input.explanation as string | undefined);
+      const result = await confirmRisk(pi, ctx, risk, cmd);
       if (result && 'block' in result) return result;
       if (result && 'rememberSession' in result && risk.sessionAllowance) {
         sessionAllowances.add(risk.sessionAllowance);
