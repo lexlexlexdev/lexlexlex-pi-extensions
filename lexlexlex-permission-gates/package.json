@@ -1,0 +1,7 @@
+{
+  "name": "@lexlexlex/permission-gates",
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

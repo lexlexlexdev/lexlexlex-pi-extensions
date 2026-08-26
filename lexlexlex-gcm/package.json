@@ -1,0 +1,7 @@
+{
+  "name": "@lexlexlex/gcm",
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
