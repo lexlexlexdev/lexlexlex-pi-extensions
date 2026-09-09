@@ -1,0 +1,10 @@
+{
+  "modelExclusions": {
+    "defaultTtlMs": 300000
+  },
+  "toolDescriptionMode": "compact",
+  "fleetView": true,
+  "fleetViewPlacement": "aboveEditor",
+  "asyncWidget": true,
+  "maxSubagentDepth": 2
+}
