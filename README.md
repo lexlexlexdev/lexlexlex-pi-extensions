@@ -8,7 +8,6 @@ Personal extensions for the [pi coding agent](https://github.com/earendil-works/
 | `lexlexlex-tool-cards.ts` | Shared card renderers used by both tool-render and permission-gates (single source of truth for the UI). Library module — not an extension itself. |
 | `lexlexlex-tool-render.ts` | Custom compact "card" rendering for built-in tools (read/grep/find/ls). Skips tools owned by other extensions to avoid registration clobbering. |
 | `lexlexlex-gcm/` | Git commit message generation. |
-| `lexlexlex-agents-setter/` | AGENTS.md helper. |
 | `lexlexlex-sound-on-complete/` | Plays a sound when the agent finishes. |
 | `pi-rtk-optimizer/` | Output rewrite/compaction tuning config. |
 
