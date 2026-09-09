@@ -1,0 +1,253 @@
+{
+  "version": 1,
+  "enabled": true,
+  "preset": "default",
+  "lines": [
+    [
+      {
+        "id": "model-provider-mtcorw0e-zuq257",
+        "type": "model-provider",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "icon": "",
+          "fg": "cyan",
+          "bg": "default",
+          "bold": false
+        }
+      },
+      {
+        "id": "thinking-level-mtcorw0e-kx1v8j",
+        "type": "thinking-level",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "",
+          "fg": "magenta",
+          "bg": "default",
+          "bold": false
+        }
+      },
+      {
+        "id": "external-status-mtcpbd6j-yfnrzz",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "permission-gates",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      },
+      {
+        "id": "context-bar-mtcpglir-gh6vn1",
+        "type": "context-bar",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "",
+          "fg": "blue",
+          "bg": "default",
+          "bold": false,
+          "tokenFormatStyle": "default",
+          "contextBarMode": "short",
+          "contextConditionalColors": true,
+          "contextWarningPercent": 70,
+          "contextDangerPercent": 90,
+          "warningFg": "yellow",
+          "warningBg": "default",
+          "dangerFg": "red",
+          "dangerBg": "default"
+        }
+      },
+      {
+        "id": "cwd-mtcp3360-0pacef",
+        "type": "cwd",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "icon": "",
+          "fg": "blue",
+          "bg": "default",
+          "bold": false,
+          "cwdDisplayStyle": "default",
+          "segments": 1
+        }
+      },
+      {
+        "id": "git-branch-mtcorw0e-hnynvb",
+        "type": "git-branch",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "no-branch",
+          "fg": "magenta",
+          "bg": "default",
+          "bold": false,
+          "gitBranchDisplayStyle": "default",
+          "surroundLeft": "",
+          "surroundRight": ""
+        }
+      },
+      {
+        "id": "session-name-mtcp3uoy-rdmk1x",
+        "type": "session-name",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "no-name",
+          "fg": "cyan",
+          "bg": "default",
+          "bold": false
+        }
+      }
+    ],
+    [
+      {
+        "id": "external-status-mtcp6fm8-bajcn4",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "tokenSpeed",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      },
+      {
+        "id": "external-status-mtcp87yj-elzak1",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "pi-cache-stats",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      }
+    ],
+    [
+      {
+        "id": "external-status-mtcp8zeu-ocwdqv",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "accounts",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      },
+      {
+        "id": "external-status-mtcp90s6-2by0ti",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "usage",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      },
+      {
+        "id": "external-status-mtcp9rjy-lptift",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "mcp",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      },
+      {
+        "id": "external-status-mtcpa3cw-o8kihn",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "",
+          "trimValue": 0,
+          "preserveTrimStyles": true
+        }
+      }
+    ]
+  ],
+  "separator": "pipe",
+  "separatorFg": "brightBlack",
+  "separatorBg": "default",
+  "iconMode": "emoji",
+  "minimalist": false,
+  "terminal": {
+    "widthMode": "full",
+    "colorLevel": "ansi256"
+  },
+  "extensionStatusRow": {
+    "hiddenKeys": [
+      "accounts",
+      "mcp",
+      "permission-gates",
+      "pi-cache-stats",
+      "tokenSpeed",
+      "usage"
+    ],
+    "knownKeys": [
+      "accounts",
+      "mcp",
+      "permission-gates",
+      "pi-cache-stats",
+      "tokenSpeed",
+      "usage"
+    ]
+  }
+}
