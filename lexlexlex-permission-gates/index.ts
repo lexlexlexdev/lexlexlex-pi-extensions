@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolCallEventResult, UserBashEventResult } from '@earendil-works/pi-coding-agent';
 import { createBashTool, getSettingsListTheme, isToolCallEventType } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList, Text } from '@earendil-works/pi-tui';
@@ -6,6 +7,22 @@ import { cardRenderCall, cardRenderResult } from '../lexlexlex-tool-cards.ts';
 
 const MAC_SOUND_FILE = '/Users/aveaxii/.pi/agent/sounds/ping-sound.mp3';
 const ENTRY_TYPE = 'permission-gates';
+
+export const ROLE_AGENTS = ['consultant', 'reviewer', 'scout', 'worker'] as const;
+export type RoleAgent = (typeof ROLE_AGENTS)[number];
+
+/**
+ * tintinweb pi-subagents runs child agents in-process and names each child
+ * session `<agent>` or `<agent>#<id>` via `session.setSessionName()` BEFORE
+ * extensions bind, so the name is readable from `ctx.sessionManager` on every
+ * extension event. Names outside the known roles (main session, resumed
+ * session, fork) resolve to undefined.
+ */
+function roleFromSessionName(sessionName: string | undefined): RoleAgent | undefined {
+  if (!sessionName) return undefined;
+  const base = sessionName.split('#')[0].trim().toLowerCase();
+  return (ROLE_AGENTS as readonly string[]).includes(base) ? (base as RoleAgent) : undefined;
+}
 
 const SESSION_ALLOW_LABEL = 'Allow by default for this session';
 const ALLOW_ONCE_LABEL = 'Allow once';
@@ -53,7 +70,7 @@ type PermissionGateMessage = {
 const CRITICAL_PATTERNS: CriticalPattern[] = [
   { label: 'Refusing recursive forced delete of root', regex: /(?:^|[;&|\s])(?:sudo\s+)?rm\s+(?=[^;&|]*-[^;&|\s]*r)(?=[^;&|]*-[^;&|\s]*f)[^;&|]*(?:\s|=)(?:--\s*)?(?:\/|\/\*)(?:$|[\s;&|])/i },
   { label: 'Refusing recursive forced delete of home', regex: /(?:^|[;&|\s])(?:sudo\s+)?rm\s+(?=[^;&|]*-[^;&|\s]*r)(?=[^;&|]*-[^;&|\s]*f)[^;&|]*(?:\s|=)(?:--\s*)?(?:~\/?|~\/\*|\$HOME\/?|\$HOME\/\*|\$\{HOME\}\/?|\$\{HOME\}\/\*|(?:\/home|\/Users)\/[^\s;&|]+\/?)(?:$|[\s;&|])/i },
-  { label: 'Refusing recursive forced delete of current directory', regex: /(?:^|[;&|\s])(?:sudo\s+)?rm\s+(?=[^;&|]*-[^;&|\s]*r)(?=[^;&|]*-[^;&|\s]*f)[^;&|]*(?:\s|=)(?:\.|\.\/|\*|\.\*)(?:$|[\s;&|])/i },
+  { label: 'Refusing recursive forced delete of current directory', regex: /(?:^|[;&|\s])(?:sudo\s+)?rm\s+(?=[^;&|]*-[^;&|\s]*r)(?=[^;&|]*-[^;&|\s]*f)[^;&|]*(?:\s|=)(?:\.|\.\/\*|\.\/|\*|\.\*)(?:$|[\s;&|])/i },
   { label: 'Refusing fork bomb', regex: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*}\s*;?\s*:/ },
   { label: 'Refusing disk overwrite', regex: /\bdd\b[^;&|]*(?:of=\/dev\/(?:disk|rdisk|sd|hd|nvme)|if=\/dev\/(?:zero|random|urandom)[^;&|]*of=\/dev\/)/i },
   { label: 'Refusing filesystem format', regex: /\bmkfs(?:\.\w+)?\b[^;&|]*\/dev\//i },
@@ -63,10 +80,11 @@ const CRITICAL_PATTERNS: CriticalPattern[] = [
 const RISK_PATTERNS: RiskPattern[] = [
   { label: 'Privilege escalation', regex: /\b(sudo|su|doas)\b/i, level: 'high' },
   { label: 'Dangerous delete', regex: /\brm\s+[^;&|]*-(?:[^;&|]*r|[^;&|]*f)[^;&|]*/i, level: 'high', sessionAllowance: 'dangerous-delete' },
-  { label: 'find delete', regex: /\bfind\b[^;&|]*\b-delete\b/i, level: 'high', sessionAllowance: 'dangerous-delete' },
+  { label: 'find delete', regex: /\bfind\b[^;&|]*?\s-delete\b/i, level: 'high', sessionAllowance: 'dangerous-delete' },
   { label: 'Disk overwrite / format', regex: /\b(dd|mkfs(?:\.\w+)?)\b/i, level: 'high' },
   { label: 'Execute remote script', regex: /\b(curl|wget)\b[^\n\r|]*\|\s*(sh|bash|zsh)\b/i, level: 'high' },
   { label: 'Bash process substitution remote exec', regex: /\bbash\s*<\(\s*(curl|wget)\b/i, level: 'high' },
+  { label: 'Remote shell access', regex: /\b(ssh|scp|sftp|rsync)\b/i, level: 'high' },
   { label: 'DB destructive operation', regex: /\b(drop\s+table|drop\s+database|truncate\s+table)\b/i, level: 'high' },
   { label: 'Sensitive path access', regex: sensitivePathRegex(), level: 'high', sessionAllowance: 'sensitive-read' },
   { label: 'Environment read', regex: /(?:^|[;&|\s])(?:printenv|env)(?:$|[\s;&|])/i, level: 'medium', sessionAllowance: 'sensitive-read' },
@@ -86,6 +104,113 @@ function sensitivePathRegex(): RegExp {
   // so quoted forms like "~/.ssh" are covered even though this literal has
   // no quote handling itself.
   return /(?:^|[\s'"=:.\/])(?:\.env(?:[.\s'"\/]|$)|[^\s'";&|]*\.pem\b|(?:id_rsa|id_ed25519|authorized_keys|known_hosts)\b|\.ssh(?:\/|$)|\.aws(?:\/|$)|(?:~|\$\{?HOME\}?|\/root|(?:\/home|\/Users)\/[^\s'";&|]+)\/(?:\.ssh|\.aws|\.gnupg|\.config\/gh)(?:\/|$)|\/etc\/|\/usr\/local\/etc\/)/i;
+}
+
+function sensitiveKeyRegex(): RegExp {
+  // Key material and system paths only — no `.env` match. The worker child
+  // may read project env files to run tests and builds; key access stays
+  // gated for every role.
+  return /(?:^|[\s'"=:.\/])(?:[^\s'";&|]*\.pem\b|(?:id_rsa|id_ed25519|authorized_keys|known_hosts)\b|\.ssh(?:\/|$)|\.aws(?:\/|$)|(?:~|\$\{?HOME\}?|\/root|(?:\/home|\/Users)\/[^\s'";&|]+)\/(?:\.ssh|\.aws|\.gnupg|\.config\/gh)(?:\/|$)|\/etc\/|\/usr\/local\/etc\/)/i;
+}
+
+/**
+ * True when this session is a UI-less `worker` subagent. Only then do worker
+ * relaxations apply (project env reads, in-cwd cleanup). A session with a UI
+ * — even one named `worker` — keeps full confirmations.
+ *
+ * Detection: tintinweb pi-subagents names each child session `<agent>#<id>`;
+ * legacy separate-process subagents exported the role via environment vars.
+ */
+function isWorkerChild(ctx: ExtensionContext): boolean {
+  if (ctx.hasUI) return false;
+  if (process.env.PI_SUBAGENT_CHILD === '1') {
+    return process.env.PI_SUBAGENT_CHILD_AGENT === 'worker';
+  }
+  try {
+    return roleFromSessionName(ctx.sessionManager.getSessionName()) === 'worker';
+  } catch {
+    return false;
+  }
+}
+
+const WORKER_SAFE_FIND_DIRS = [
+  'dist',
+  'build',
+  'out',
+  'tmp',
+  'temp',
+  '.tmp',
+  'node_modules',
+  '.next',
+  'coverage',
+  '.cache',
+  'cache',
+] as const;
+
+function resolvesInsideCwd(target: string, cwd: string): boolean {
+  const trimmed = target.trim();
+  if (!trimmed || trimmed.startsWith('-')) return false;
+  if (/^(~|\$HOME|\$\{HOME\})/.test(trimmed)) return false;
+  // A `..` that stays inside is rare for cleanup commands, so treat any
+  // `..` as outside: the worker must use cwd-relative paths.
+  if (trimmed.includes('..')) return false;
+  const base = trimmed.replace(/\/\*+$/, '').replace(/\/+$/, '') || '.';
+  const resolved = base.startsWith('/') ? base : resolve(cwd, base);
+  const prefix = cwd.endsWith('/') ? cwd : `${cwd}/`;
+  return resolved === cwd || resolved.startsWith(prefix);
+}
+
+function rmTargetsOutsideCwd(subjects: string[], cwd: string): boolean {
+  let sawRm = false;
+  for (const subject of subjects) {
+    for (const match of subject.matchAll(/(?:^|[;&|\s])(?:sudo\s+)?rm\s+([^;&|]*)/gi)) {
+      sawRm = true;
+      const tokens = match[1].split(/\s+/).filter(Boolean);
+      const targets = tokens.filter((t) => t !== '--' && !t.startsWith('-'));
+      if (targets.length === 0) return true;
+      if (targets.some((t) => !resolvesInsideCwd(t, cwd))) return true;
+    }
+  }
+  return sawRm ? false : true;
+}
+
+function findDeleteOutsideSafeDirs(subjects: string[], cwd: string): boolean {
+  let sawFind = false;
+  const prefix = cwd.endsWith('/') ? cwd : `${cwd}/`;
+  for (const subject of subjects) {
+    for (const match of subject.matchAll(/(?:^|[;&|\s])find\s+([^;&|]*?-delete[^;&|]*)/gi)) {
+      sawFind = true;
+      const tokens = match[1].split(/\s+/).filter(Boolean);
+      let dir = '.';
+      for (const token of tokens) {
+        if (token.startsWith('-') || token === '!') continue;
+        dir = token;
+        break;
+      }
+      // Bare `find . -delete` wipes the whole project: never worker-safe.
+      if (dir === '.') return true;
+      const resolved = dir.startsWith('/') ? dir : resolve(cwd, dir);
+      const insideSafe = (WORKER_SAFE_FIND_DIRS as readonly string[]).some(
+        (safe) => resolved === `${prefix}${safe}` || resolved.startsWith(`${prefix}${safe}/`),
+      );
+      if (!insideSafe) return true;
+    }
+  }
+  return sawFind ? false : true;
+}
+
+function workerAllowedRiskLabels(subjects: string[], cwd: string): Set<string> {
+  const allowed = new Set<string>();
+  // Project env reads and `env`/`printenv` unblock test and build runs.
+  // Key material (.pem, .ssh, .aws, /etc) is NOT env-only and stays gated.
+  allowed.add('Environment read');
+  const combined = subjects.join('\n');
+  if (sensitivePathRegex().test(combined) && !sensitiveKeyRegex().test(combined)) {
+    allowed.add('Sensitive path access');
+  }
+  if (!rmTargetsOutsideCwd(subjects, cwd)) allowed.add('Dangerous delete');
+  if (!findDeleteOutsideSafeDirs(subjects, cwd)) allowed.add('find delete');
+  return allowed;
 }
 
 function normalize(command: string): string {
@@ -143,10 +268,11 @@ function findCriticalRiskAny(subjects: string[]): CriticalPattern | undefined {
  * labels joined, level escalated to worst, first session allowance kept so
  * e.g. `sudo git push` offers git-mutation instead of being masked by sudo.
  */
-function collectRisks(subjects: string[]): RiskPattern | undefined {
+function collectRisks(subjects: string[], exclude?: Set<string>): RiskPattern | undefined {
   const seen = new Set<string>();
   const matched: RiskPattern[] = [];
   for (const pattern of RISK_PATTERNS) {
+    if (exclude?.has(pattern.label)) continue;
     if (subjects.some((subject) => pattern.regex.test(subject)) && !seen.has(pattern.label)) {
       seen.add(pattern.label);
       matched.push(pattern);
@@ -170,19 +296,25 @@ function inputTextForReadLikeTool(toolName: string, input: Record<string, unknow
   return normalize(parts.join(' '));
 }
 
-function findReadRisk(toolName: string, input: Record<string, unknown>): RiskPattern | undefined {
+function findReadRisk(
+  toolName: string,
+  input: Record<string, unknown>,
+  opts?: { workerRelaxed?: boolean },
+): RiskPattern | undefined {
   if (!['read', 'grep', 'find', 'ls'].includes(toolName)) return;
   const text = inputTextForReadLikeTool(toolName, input);
-  if (!sensitivePathRegex().test(text)) return;
+  const regex = opts?.workerRelaxed ? sensitiveKeyRegex() : sensitivePathRegex();
+  if (!regex.test(text)) return;
   return {
     label: 'Sensitive read',
-    regex: sensitivePathRegex(),
+    regex,
     level: 'high',
     sessionAllowance: 'sensitive-read',
   };
 }
 
 function updateStatus(ctx: ExtensionContext, mode: GateMode): void {
+  if (!ctx.hasUI) return
   const marker = mode === 'safe'
     ? ctx.ui.theme.fg('success', 'S')
     : ctx.ui.theme.fg('warning', 'F');
@@ -236,15 +368,17 @@ function blockedUserBashResult(reason: string): UserBashEventResult {
 }
 
 // Named exports exist so the matching pipeline can be unit-tested in isolation.
-export { gateSubjects, findCriticalRiskAny, collectRisks, sensitivePathRegex };
+export { collectRisks, findCriticalRiskAny, findDeleteOutsideSafeDirs, gateSubjects, rmTargetsOutsideCwd, roleFromSessionName, sensitiveKeyRegex, sensitivePathRegex, workerAllowedRiskLabels };
 
 export default function permissionGates(pi: ExtensionAPI) {
   let loadedSessionId: string | undefined;
   let mode: GateMode = 'safe';
   let sessionAllowances = new Set<SessionAllowance>();
-
   function ensureSession(ctx: ExtensionContext): void {
-    const sessionId = ctx.sessionManager.getSessionId();
+    // Match pi-subagents: persisted sessions use the session-file path as
+    // the capability-registry key, with the in-memory ID as the fallback.
+    const sessionId =
+      ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();
     if (sessionId === loadedSessionId) return;
     loadedSessionId = sessionId;
     const restored = restoreState(ctx.sessionManager.getEntries());
@@ -382,7 +516,12 @@ export default function permissionGates(pi: ExtensionAPI) {
   });
 
   pi.on('before_agent_start', (_event, ctx) => {
+    ensureSession(ctx);
     ensureEnhancedBash(ctx);
+  });
+
+  pi.on('session_shutdown', () => {
+    loadedSessionId = undefined;
   });
 
   pi.on('tool_call', async (event, ctx): Promise<ToolCallEventResult | void> => {
@@ -394,7 +533,10 @@ export default function permissionGates(pi: ExtensionAPI) {
       const critical = findCriticalRiskAny(subjects);
       if (critical) return { block: true, reason: critical.label };
 
-      const risk = collectRisks(subjects);
+      const workerExcludes = isWorkerChild(ctx)
+        ? workerAllowedRiskLabels(subjects, ctx.cwd ?? process.cwd())
+        : undefined;
+      const risk = collectRisks(subjects, workerExcludes);
       if (!risk) return;
       // Demand an explanation only while WE own the schema (i.e. the model
       // can actually provide it). If another extension stripped the field,
@@ -413,7 +555,9 @@ export default function permissionGates(pi: ExtensionAPI) {
       return;
     }
 
-    const readRisk = findReadRisk(event.toolName, event.input as Record<string, unknown>);
+    const readRisk = findReadRisk(event.toolName, event.input as Record<string, unknown>, {
+      workerRelaxed: isWorkerChild(ctx),
+    });
     if (!readRisk) return;
     if (mode === 'full') return;
     if (readRisk.sessionAllowance && sessionAllowances.has(readRisk.sessionAllowance)) return;

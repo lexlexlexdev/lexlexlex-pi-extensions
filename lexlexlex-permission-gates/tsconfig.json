@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+    "typeRoots": ["../lexlexlex-multicodex/node_modules/@types"],
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["../lexlexlex-multicodex/node_modules/@earendil-works/pi-coding-agent"],
+      "@earendil-works/pi-tui": ["../lexlexlex-multicodex/node_modules/@earendil-works/pi-tui"],
+      "typebox": ["../lexlexlex-multicodex/node_modules/typebox"]
+    },
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["index.ts"]
+}
