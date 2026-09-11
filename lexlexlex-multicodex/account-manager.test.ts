@@ -507,6 +507,168 @@ describe('AccountManager pi auth exhaustion handling', () => {
   })
 })
 
+describe('AccountManager quota cooldown reconciliation', () => {
+  const accountRow = (
+    email: string,
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    email,
+    accessToken: `${email}-access`,
+    refreshToken: `${email}-refresh`,
+    expiresAt: Date.now() + 3_600_000,
+    ...overrides,
+  })
+
+  const usageSnapshot = (
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    primary: { usedPercent: 0, resetAt: Date.now() + 18_000_000 },
+    secondary: { usedPercent: 0, resetAt: Date.now() + 600_000_000 },
+    allowed: true,
+    limitReached: false,
+    fetchedAt: Date.now(),
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.storageData.accounts = []
+    mocks.storageData.activeEmail = undefined
+    mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined)
+  })
+
+  it('does not park an account when the API still reports capacity', async () => {
+    mocks.storageData.accounts = [accountRow('ok@example.com')]
+    mocks.fetchCodexUsage.mockResolvedValue(usageSnapshot())
+
+    const manager = new AccountManager()
+    const warningHandler = vi.fn()
+    manager.setWarningHandler(warningHandler)
+    const account = manager.getAccount('ok@example.com')
+    expect(account).toBeDefined()
+    if (!account) return
+
+    await manager.handleQuotaExceeded(account)
+
+    expect(account.quotaExhaustedUntil).toBeUndefined()
+    expect(warningHandler.mock.calls[0]?.[0]).toContain(
+      'still reports capacity',
+    )
+  })
+
+  it('parks an account until the exhausted window resets', async () => {
+    mocks.storageData.accounts = [accountRow('ok@example.com')]
+    const weeklyReset = Date.now() + 500_000
+    mocks.fetchCodexUsage.mockResolvedValue(
+      usageSnapshot({
+        primary: { usedPercent: 68, resetAt: Date.now() + 5_000 },
+        secondary: { usedPercent: 100, resetAt: weeklyReset },
+        allowed: false,
+        limitReached: true,
+      }),
+    )
+
+    const manager = new AccountManager()
+    const account = manager.getAccount('ok@example.com')
+    expect(account).toBeDefined()
+    if (!account) return
+
+    await manager.handleQuotaExceeded(account)
+
+    expect(account.quotaExhaustedUntil).toBe(weeklyReset)
+  })
+
+  it('clears a stale marker that the API contradicts', async () => {
+    mocks.storageData.accounts = [
+      accountRow('ok@example.com', { quotaExhaustedUntil: Date.now() + 3_600_000 }),
+    ]
+    mocks.fetchCodexUsage.mockResolvedValue(usageSnapshot())
+
+    const manager = new AccountManager()
+    const cleared = await manager.reconcileQuotaMarkers()
+
+    expect(cleared).toBe(1)
+    expect(
+      manager.getAccount('ok@example.com')?.quotaExhaustedUntil,
+    ).toBeUndefined()
+    expect(mocks.saveStorage).toHaveBeenCalled()
+  })
+
+  it('keeps a marker that the API confirms', async () => {
+    mocks.storageData.accounts = [
+      accountRow('busy@example.com', { quotaExhaustedUntil: Date.now() + 3_600_000 }),
+    ]
+    mocks.fetchCodexUsage.mockResolvedValue(
+      usageSnapshot({ allowed: false, limitReached: true }),
+    )
+
+    const manager = new AccountManager()
+    const cleared = await manager.reconcileQuotaMarkers()
+
+    expect(cleared).toBe(0)
+    expect(
+      manager.getAccount('busy@example.com')?.quotaExhaustedUntil,
+    ).toBeGreaterThan(Date.now())
+  })
+
+  it('keeps a marker when the usage request fails', async () => {
+    mocks.storageData.accounts = [
+      accountRow('ok@example.com', { quotaExhaustedUntil: Date.now() + 3_600_000 }),
+    ]
+    mocks.fetchCodexUsage.mockRejectedValue(new Error('network down'))
+
+    const manager = new AccountManager()
+    const cleared = await manager.reconcileQuotaMarkers()
+
+    expect(cleared).toBe(0)
+    expect(
+      manager.getAccount('ok@example.com')?.quotaExhaustedUntil,
+    ).toBeGreaterThan(Date.now())
+  })
+
+  it('rotates to a marked account when the API reports capacity', async () => {
+    mocks.storageData.accounts = [
+      accountRow('dim@example.com', { quotaExhaustedUntil: Date.now() + 3_600_000 }),
+      accountRow('lex@example.com'),
+    ]
+    mocks.fetchCodexUsage.mockImplementation(async (token: string) =>
+      token === 'dim@example.com-access'
+        ? usageSnapshot()
+        : usageSnapshot({
+            secondary: { usedPercent: 100, resetAt: Date.now() + 500_000 },
+            allowed: false,
+            limitReached: true,
+          }),
+    )
+
+    const manager = new AccountManager()
+    const selected = await manager.activateBestAccount()
+
+    expect(selected?.email).toBe('dim@example.com')
+    expect(
+      manager.getAccount('dim@example.com')?.quotaExhaustedUntil,
+    ).toBeUndefined()
+  })
+
+  it('leaves a just-failed account alone while rotating', async () => {
+    mocks.storageData.accounts = [
+      accountRow('just@example.com', { quotaExhaustedUntil: Date.now() + 3_600_000 }),
+      accountRow('next@example.com'),
+    ]
+    mocks.fetchCodexUsage.mockResolvedValue(usageSnapshot())
+
+    const manager = new AccountManager()
+    const cleared = await manager.reconcileQuotaMarkers({
+      excludeEmails: new Set(['just@example.com']),
+    })
+
+    expect(cleared).toBe(0)
+    expect(
+      manager.getAccount('just@example.com')?.quotaExhaustedUntil,
+    ).toBeGreaterThan(Date.now())
+  })
+})
+
 describe('AccountManager ready-gate', () => {
   beforeEach(() => {
     vi.clearAllMocks()

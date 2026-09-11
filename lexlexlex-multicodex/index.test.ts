@@ -244,6 +244,53 @@ describe('pickBestAccount', () => {
     expect(['a', 'b']).toContain(selected?.email)
   })
 
+  it('skips accounts the API reports as out of capacity', () => {
+    const accounts = [makeAccount('a'), makeAccount('b')]
+    const usage = new Map([
+      [
+        'a',
+        {
+          primary: { usedPercent: 0, resetAt: 1000 },
+          secondary: { usedPercent: 0, resetAt: 2000 },
+          allowed: false,
+          limitReached: true,
+          fetchedAt: 0,
+        },
+      ],
+      [
+        'b',
+        {
+          primary: { usedPercent: 30, resetAt: 3000 },
+          secondary: { usedPercent: 30, resetAt: 4000 },
+          allowed: true,
+          limitReached: false,
+          fetchedAt: 0,
+        },
+      ],
+    ])
+
+    expect(pickBestAccount(accounts, usage, { now: 0 })?.email).toBe('b')
+  })
+
+  it('still returns a limited account when every account is limited', () => {
+    const accounts = [makeAccount('a'), makeAccount('b')]
+    const blocked = {
+      primary: { usedPercent: 100, resetAt: 1000 },
+      secondary: { usedPercent: 100, resetAt: 2000 },
+      allowed: false,
+      limitReached: true,
+      fetchedAt: 0,
+    }
+    const usage = new Map([
+      ['a', blocked],
+      ['b', blocked],
+    ])
+
+    expect(['a', 'b']).toContain(
+      pickBestAccount(accounts, usage, { now: 0 })?.email,
+    )
+  })
+
   it('ignores exhausted accounts', () => {
     const accounts = [
       makeAccount('a', { quotaExhaustedUntil: 2000 }),

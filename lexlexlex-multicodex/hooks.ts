@@ -10,6 +10,9 @@ async function refreshAndActivateBestAccount(
   try {
     await accountManager.loadPiAuth()
     await accountManager.refreshUsageForAllAccounts({ force: true })
+    // Drop stale cooldown markers before the first request. Usage is fresh
+    // here, so this costs no extra API calls.
+    await accountManager.reconcileQuotaMarkers()
 
     const needsReauth = accountManager.getAccountsNeedingReauth()
     if (needsReauth.length > 0) {

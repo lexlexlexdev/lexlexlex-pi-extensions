@@ -383,6 +383,9 @@ async function refreshSingleAccount(
   }
 
   await accountManager.refreshUsageForAccount(account, { force: true })
+  // The refresh is the freshest data available, so let it repair a stale
+  // cooldown marker before the status line is built.
+  await accountManager.reconcileQuotaMarkers()
   ctx.ui.notify(
     `refreshed ${formatAccountStatusLine(accountManager, email)}`,
     'info',
@@ -394,12 +397,15 @@ async function refreshAllAccounts(
   accountManager: AccountManager,
 ): Promise<void> {
   await accountManager.refreshUsageForAllAccounts({ force: true })
+  const cleared = await accountManager.reconcileQuotaMarkers()
   const accounts = accountManager.getAccounts()
   const needsReauth = accountManager.getAccountsNeedingReauth().length
   const summary =
     accounts.length === 0
       ? NO_ACCOUNTS_MESSAGE
-      : `refreshed ${accounts.length} account(s); reauth needed=${needsReauth}`
+      : `refreshed ${accounts.length} account(s); reauth needed=${needsReauth}${
+          cleared > 0 ? `; cooldowns cleared=${cleared}` : ''
+        }`
   ctx.ui.notify(summary, needsReauth > 0 ? 'warning' : 'info')
 }
 

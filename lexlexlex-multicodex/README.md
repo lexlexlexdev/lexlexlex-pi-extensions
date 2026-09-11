@@ -92,7 +92,7 @@ Use `/fast` to send supported official Codex requests with `service_tier: priori
 - **Auth import.** When pi has stored Codex OAuth credentials, MultiCodex imports them automatically and merges duplicate credentials into existing managed accounts when possible.
 - **Token refresh.** OAuth tokens are refreshed before expiry so requests do not fail due to stale credentials. You can also force a health refresh with `/multicodex refresh` or re-authenticate explicitly with `/multicodex reauth`.
 - **Usage tracking.** Usage data is fetched from the Codex API. The footer polls the active account every five seconds and caches account data for other rotation checks.
-- **Quota cooldown.** When an account is exhausted, it stays on cooldown until its next known reset time (or 1 hour if the reset time is unknown).
+- **Quota cooldown.** When an account is exhausted, it stays on cooldown until the last exhausted usage window resets (or 1 hour when the reset time is unknown). Before each request, and at session start, MultiCodex compares every cooldown with the Codex usage API and clears any marker the API contradicts, so a transient limit error cannot park a working account. `/multicodex refresh` runs the same check on demand, and `/multicodex reset quota` clears markers by hand.
 - **Shared utility seams.** Provider mirroring, stream primitives, and `~/.pi/agent/*` path helpers are shared with `pi-credential-vault` through `pi-provider-utils`. MultiCodex still owns account storage, token policy, footer behavior, and command UX.
 
 ## Local development

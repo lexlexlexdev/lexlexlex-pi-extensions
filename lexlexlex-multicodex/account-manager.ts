@@ -9,7 +9,12 @@ import {
   type StorageData,
   saveStorage,
 } from './storage'
-import { type CodexUsageSnapshot, getNextResetAt } from './usage'
+import {
+  type CodexUsageSnapshot,
+  getExhaustedResetAt,
+  getNextResetAt,
+  isUsageAvailable,
+} from './usage'
 import { fetchCodexUsage } from './usage-client'
 
 const USAGE_CACHE_TTL_MS = 5 * 60 * 1000
@@ -37,6 +42,7 @@ export class AccountManager {
   private stateChangeHandlers = new Set<StateChangeHandler>()
   private warnedAuthFailureEmails = new Set<string>()
   private warnedUsageFailureEmails = new Set<string>()
+  private warnedCapacityMismatchEmails = new Set<string>()
   private readyPromise: Promise<void> = Promise.resolve()
   private readyResolve?: () => void
   private readonly oauth: OAuthAuth
@@ -110,6 +116,7 @@ export class AccountManager {
   resetSessionWarnings(): void {
     this.warnedAuthFailureEmails.clear()
     this.warnedUsageFailureEmails.clear()
+    this.warnedCapacityMismatchEmails.clear()
   }
 
   notifyRotationSkipForAuthFailure(account: Account, error: unknown): void {
@@ -441,6 +448,47 @@ export class AccountManager {
     )
   }
 
+  /**
+   * Remove cooldown markers that the Codex API contradicts. A marker can be
+   * stale, or it can come from a transient error, and a wrongly parked
+   * account is worse than a retry: it can stop every request. Uses cached
+   * usage when that cache is fresh, so the usual cost is one lookup.
+   * Accounts in `excludeEmails` are left alone, because they just failed.
+   */
+  async reconcileQuotaMarkers(options?: {
+    excludeEmails?: Set<string>
+    signal?: AbortSignal
+  }): Promise<number> {
+    const now = Date.now()
+    const marked = this.getAccounts().filter(
+      (account) =>
+        account.quotaExhaustedUntil !== undefined &&
+        account.quotaExhaustedUntil > now &&
+        !options?.excludeEmails?.has(account.email),
+    )
+    if (marked.length === 0) return 0
+
+    let cleared = 0
+    await Promise.all(
+      marked.map(async (account) => {
+        const usage = await this.refreshUsageForAccount(account, {
+          signal: options?.signal,
+        })
+        if (!isUsageAvailable(usage)) return
+        account.quotaExhaustedUntil = undefined
+        cleared += 1
+        if (!this.isPiAuthAccount(account)) {
+          this.save()
+        }
+      }),
+    )
+
+    if (cleared > 0) {
+      this.notifyStateChanged()
+    }
+    return cleared
+  }
+
   async activateBestAccount(options?: {
     excludeEmails?: Set<string>
     signal?: AbortSignal
@@ -448,6 +496,7 @@ export class AccountManager {
     const now = Date.now()
     this.clearExpiredExhaustion(now)
     const accounts = this.getAccounts()
+    await this.reconcileQuotaMarkers(options)
     await this.refreshUsageIfStale(accounts, options)
 
     const selected = pickBestAccount(accounts, this.usageCache, {
@@ -475,8 +524,25 @@ export class AccountManager {
       force: true,
       signal: options?.signal,
     })
+
+    // A limit error can come from a transient condition, or it can apply to
+    // one model only. When the API still reports capacity, park nothing: a
+    // wrong cooldown can block a working account for a full window.
+    if (isUsageAvailable(usage)) {
+      if (!this.warnedCapacityMismatchEmails.has(account.email)) {
+        this.warnedCapacityMismatchEmails.add(account.email)
+        this.warningHandler?.(
+          `Multicodex: ${account.email} reported a limit error, but the Codex API still reports capacity. Keeping it in rotation.`,
+        )
+      }
+      return
+    }
+
     const now = Date.now()
-    const resetAt = getNextResetAt(usage)
+    // Prefer the reset of the window that is really exhausted. The earliest
+    // reset can belong to a window with spare capacity, which would wake the
+    // account too early and fail again.
+    const resetAt = getExhaustedResetAt(usage) ?? getNextResetAt(usage)
     const fallback = now + QUOTA_COOLDOWN_MS
     const until = resetAt && resetAt > now ? resetAt : fallback
     this.markExhausted(account.email, until)

@@ -3,6 +3,7 @@ import {
   type CodexUsageSnapshot,
   getMaxUsedPercent,
   getWeeklyResetAt,
+  isUsageBlocked,
   isUsageUntouched,
 } from './usage'
 
@@ -53,7 +54,15 @@ export function pickBestAccount(
   )
   if (available.length === 0) return undefined
 
-  const withUsage = available.filter((account) =>
+  // Keep accounts that the API reports as out of capacity out of the way
+  // while another account can serve the request. They stay as a last
+  // resort so rotation always has something to try.
+  const unblocked = available.filter(
+    (account) => !isUsageBlocked(usageByEmail.get(account.email)),
+  )
+  const pool = unblocked.length > 0 ? unblocked : available
+
+  const withUsage = pool.filter((account) =>
     usageByEmail.has(account.email),
   )
   const untouched = withUsage.filter((account) =>
@@ -70,5 +79,5 @@ export function pickBestAccount(
   const lowestUsage = pickLowestUsageAccount(withUsage, usageByEmail)
   if (lowestUsage) return lowestUsage
 
-  return pickRandomAccount(available)
+  return pickRandomAccount(pool)
 }

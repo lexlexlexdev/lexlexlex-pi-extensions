@@ -5,6 +5,7 @@ describe('handleSessionStart', () => {
   it('imports native pi auth when no managed accounts exist', async () => {
     const loadPiAuth = vi.fn().mockResolvedValue(undefined)
     const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined)
+    const reconcileQuotaMarkers = vi.fn().mockResolvedValue(0)
     const getAccountsNeedingReauth = vi.fn().mockReturnValue([])
     const getAvailableManualAccount = vi.fn().mockReturnValue(undefined)
     const hasManualAccount = vi.fn().mockReturnValue(false)
@@ -17,6 +18,7 @@ describe('handleSessionStart', () => {
       getAccounts: () => [],
       loadPiAuth,
       refreshUsageForAllAccounts,
+      reconcileQuotaMarkers,
       getAccountsNeedingReauth,
       getAvailableManualAccount,
       hasManualAccount,
@@ -29,6 +31,7 @@ describe('handleSessionStart', () => {
     await vi.waitFor(() => {
       expect(loadPiAuth).toHaveBeenCalledOnce()
       expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true })
+      expect(reconcileQuotaMarkers).toHaveBeenCalled()
       expect(getAvailableManualAccount).toHaveBeenCalled()
       expect(activateBestAccount).toHaveBeenCalled()
       expect(markReady).toHaveBeenCalled()
@@ -38,6 +41,7 @@ describe('handleSessionStart', () => {
   it('refreshes and activates when accounts exist and no manual account is available', async () => {
     const loadPiAuth = vi.fn().mockResolvedValue(undefined)
     const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined)
+    const reconcileQuotaMarkers = vi.fn().mockResolvedValue(0)
     const getAvailableManualAccount = vi.fn().mockReturnValue(undefined)
     const hasManualAccount = vi.fn().mockReturnValue(false)
     const clearManualAccount = vi.fn()
@@ -50,6 +54,7 @@ describe('handleSessionStart', () => {
       loadPiAuth,
       isPiAuthAccount: () => false,
       refreshUsageForAllAccounts,
+      reconcileQuotaMarkers,
       getAccountsNeedingReauth: () => [],
       getAvailableManualAccount,
       hasManualAccount,
@@ -63,6 +68,7 @@ describe('handleSessionStart', () => {
       expect(beginInitialization).toHaveBeenCalled()
       expect(loadPiAuth).toHaveBeenCalled()
       expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true })
+      expect(reconcileQuotaMarkers).toHaveBeenCalled()
       expect(getAvailableManualAccount).toHaveBeenCalled()
       expect(hasManualAccount).toHaveBeenCalled()
       expect(clearManualAccount).not.toHaveBeenCalled()
@@ -74,6 +80,7 @@ describe('handleSessionStart', () => {
   it('keeps the manual account when one is available', async () => {
     const loadPiAuth = vi.fn().mockResolvedValue(undefined)
     const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined)
+    const reconcileQuotaMarkers = vi.fn().mockResolvedValue(0)
     const getAvailableManualAccount = vi
       .fn()
       .mockReturnValue({ email: 'manual@example.com' })
@@ -88,6 +95,7 @@ describe('handleSessionStart', () => {
       loadPiAuth,
       isPiAuthAccount: () => false,
       refreshUsageForAllAccounts,
+      reconcileQuotaMarkers,
       getAccountsNeedingReauth: () => [],
       getAvailableManualAccount,
       hasManualAccount,
@@ -101,6 +109,7 @@ describe('handleSessionStart', () => {
       expect(beginInitialization).toHaveBeenCalled()
       expect(loadPiAuth).toHaveBeenCalled()
       expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true })
+      expect(reconcileQuotaMarkers).toHaveBeenCalled()
       expect(getAvailableManualAccount).toHaveBeenCalled()
       expect(hasManualAccount).not.toHaveBeenCalled()
       expect(clearManualAccount).not.toHaveBeenCalled()
@@ -114,6 +123,7 @@ describe('handleNewSessionSwitch', () => {
   it('refreshes and clears stale manual state before activating the best account', async () => {
     const loadPiAuth = vi.fn().mockResolvedValue(undefined)
     const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined)
+    const reconcileQuotaMarkers = vi.fn().mockResolvedValue(0)
     const getAvailableManualAccount = vi.fn().mockReturnValue(undefined)
     const hasManualAccount = vi.fn().mockReturnValue(true)
     const clearManualAccount = vi.fn()
@@ -125,6 +135,7 @@ describe('handleNewSessionSwitch', () => {
       loadPiAuth,
       isPiAuthAccount: () => false,
       refreshUsageForAllAccounts,
+      reconcileQuotaMarkers,
       getAccountsNeedingReauth: () => [],
       getAvailableManualAccount,
       hasManualAccount,
@@ -138,6 +149,7 @@ describe('handleNewSessionSwitch', () => {
       expect(beginInitialization).toHaveBeenCalled()
       expect(loadPiAuth).toHaveBeenCalled()
       expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true })
+      expect(reconcileQuotaMarkers).toHaveBeenCalled()
       expect(getAvailableManualAccount).toHaveBeenCalled()
       expect(hasManualAccount).toHaveBeenCalled()
       expect(clearManualAccount).toHaveBeenCalled()
