@@ -304,14 +304,34 @@ function isComponentUnfolded(component: any): boolean {
 const TOOL_PARENT = Symbol.for("lexlexlex.tool-groups.parent");
 
 /**
+ * A tool execution is done once Pi has pushed its final (non-partial) result.
+ * ToolExecutionComponent keeps no timing fields, so completion is derived from
+ * the component's own state and the moment we first observed it finished.
+ */
+function childFinished(child: any): boolean {
+	try {
+		return child?.isPartial === false && child?.result !== undefined;
+	} catch {
+		return true;
+	}
+}
+
+/**
  * A folded run of tool executions. It is a plain chat-container child, which is
  * what makes Ctrl+O work: Pi's setToolsExpanded() iterates chatContainer
  * children and calls setExpanded() on anything that has the method.
  */
 class ToolGroupComponent extends Container {
-	readonly startedAt = Date.now();
 	endedAt?: number;
 	private expandedState = false;
+	/**
+	 * Timer base for the current burst of calls. Re-based when a new call joins a
+	 * run whose previous calls had all finished, so an idle gap between bursts is
+	 * not billed to the block.
+	 */
+	private windowStart = Date.now();
+	private windowLastFinish = 0;
+	private readonly finishedAt = new WeakMap<object, number>();
 
 	get isSealed(): boolean {
 		return this.endedAt !== undefined;
@@ -337,6 +357,12 @@ class ToolGroupComponent extends Container {
 	addTool(tool: any): void {
 		this.children.push(tool);
 		(tool as Record<PropertyKey, unknown>)[TOOL_PARENT] = this;
+		// A finished burst followed by new work restarts the clock for that burst.
+		const prior = this.children.slice(0, -1);
+		if (prior.length > 0 && prior.every((child) => childFinished(child))) {
+			this.windowStart = Date.now();
+			this.windowLastFinish = 0;
+		}
 		// Keep a tool added to an already-expanded group consistent with it.
 		(tool as { setExpanded?: (value: boolean) => void }).setExpanded?.(this.expandedState);
 	}
@@ -349,11 +375,33 @@ class ToolGroupComponent extends Container {
 		}
 	}
 
+	/** True while at least one child still has a partial (streaming) result. */
+	private hasPending(): boolean {
+		const now = Date.now();
+		for (const child of this.children) {
+			if (!childFinished(child)) return true;
+			this.noteFinish(child, now);
+		}
+		return false;
+	}
+
+	private noteFinish(child: any, now: number): void {
+		let finished = this.finishedAt.get(child);
+		if (finished === undefined) {
+			finished = now;
+			this.finishedAt.set(child, finished);
+		}
+		this.windowLastFinish = Math.max(this.windowLastFinish, finished);
+	}
+
 	private header(): string {
 		const count = this.children.length;
-		const elapsed = (this.endedAt ?? Date.now()) - this.startedAt;
-		const label = `${count} ${count === 1 ? "tool" : "tools"} · ${formatDuration(elapsed)}`;
-		const icon = this.isSealed ? fg("dim", "✓") : fg("accent", "⏺");
+		const pending = this.hasPending();
+		// Frozen at the last finish while nothing runs; only ticks during real work.
+		const elapsed = pending ? Date.now() - this.windowStart : this.windowLastFinish - this.windowStart;
+		const label = `${count} ${count === 1 ? "tool" : "tools"} · ${formatDuration(Math.max(0, elapsed))}`;
+		const working = pending || (this.children.length === 0 && !this.isSealed);
+		const icon = working ? fg("accent", "⏺") : fg("dim", "✓");
 		return `${icon} ${fg("muted", label)}`;
 	}
 
