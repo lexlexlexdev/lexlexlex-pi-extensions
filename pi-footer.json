@@ -53,13 +53,13 @@
         "enabled": true,
         "options": {
           "raw": true,
-          "hideWhenEmpty": false,
+          "hideWhenEmpty": true,
           "icon": "",
           "text": "",
           "fg": "blue",
           "bg": "default",
           "bold": false,
-          "tokenFormatStyle": "default",
+          "tokenFormatStyle": "compact",
           "contextBarMode": "short",
           "contextConditionalColors": true,
           "contextWarningPercent": 70,
@@ -154,40 +154,6 @@
     ],
     [
       {
-        "id": "external-status-mtcp8zeu-ocwdqv",
-        "type": "external-status",
-        "enabled": true,
-        "options": {
-          "raw": false,
-          "hideWhenEmpty": true,
-          "icon": "",
-          "text": "-",
-          "fg": "default",
-          "bg": "default",
-          "bold": false,
-          "externalStatusKey": "accounts",
-          "trimValue": 0,
-          "preserveTrimStyles": true
-        }
-      },
-      {
-        "id": "external-status-mtcp90s6-2by0ti",
-        "type": "external-status",
-        "enabled": true,
-        "options": {
-          "raw": false,
-          "hideWhenEmpty": true,
-          "icon": "",
-          "text": "-",
-          "fg": "default",
-          "bg": "default",
-          "bold": false,
-          "externalStatusKey": "usage",
-          "trimValue": 0,
-          "preserveTrimStyles": true
-        }
-      },
-      {
         "id": "external-status-mtcp9rjy-lptift",
         "type": "external-status",
         "enabled": true,
@@ -211,12 +177,31 @@
         "options": {
           "raw": false,
           "hideWhenEmpty": true,
+          "icon": "cv",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "externalStatusKey": "caveman",
+          "trimValue": 10,
+          "preserveTrimStyles": true
+        }
+      }
+    ],
+    [
+      {
+        "id": "external-status-mu0kan9a-aj3qgc",
+        "type": "external-status",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
           "icon": "",
           "text": "-",
           "fg": "default",
           "bg": "default",
           "bold": false,
-          "externalStatusKey": "",
+          "externalStatusKey": "multicodex-usage",
           "trimValue": 0,
           "preserveTrimStyles": true
         }
@@ -224,7 +209,7 @@
     ]
   ],
   "separator": "pipe",
-  "separatorFg": "brightBlack",
+  "separatorFg": "brightBlue",
   "separatorBg": "default",
   "iconMode": "emoji",
   "minimalist": false,
@@ -235,7 +220,9 @@
   "extensionStatusRow": {
     "hiddenKeys": [
       "accounts",
+      "caveman",
       "mcp",
+      "multicodex-usage",
       "permission-gates",
       "pi-cache-stats",
       "tokenSpeed",
@@ -243,7 +230,9 @@
     ],
     "knownKeys": [
       "accounts",
+      "caveman",
       "mcp",
+      "multicodex-usage",
       "permission-gates",
       "pi-cache-stats",
       "tokenSpeed",
