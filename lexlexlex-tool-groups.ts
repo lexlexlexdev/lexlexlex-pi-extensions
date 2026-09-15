@@ -327,7 +327,9 @@ function isComponentUnfolded(component: any): boolean {
 
 /** Back-pointer so removeChild() can find the group owning a tool. */
 const TOOL_PARENT = Symbol.for("lexlexlex.tool-groups.parent");
-/** The container a tool card lives in, so the card-air guard can see its siblings. */
+/** The chat container a group lives in, so it can see the siblings it must space against. */
+const GROUP_CONTAINER = Symbol.for("lexlexlex.tool-groups.container");
+/** The container a tool card lives in, for the same reason. */
 const TOOL_CONTAINER = Symbol.for("lexlexlex.tool-groups.tool-container");
 
 /**
@@ -434,13 +436,21 @@ class ToolGroupComponent extends Container {
 		return `${icon} ${fg("muted", label)}`;
 	}
 
+	/**
+	 * Pi gives every chat entry a blank line of air that the *later* entry owns: user
+	 * messages pad their own bottom edge and native tool cards push a leading "".
+	 * The compact cards (lexlexlex-tool-cards) and a folded block have neither, so
+	 * both bring their own — see `needsAir` for the shared rule.
+	 */
+	private airAbove(width: number): string[] {
+		return needsAir(this, (this as Record<PropertyKey, unknown>)[GROUP_CONTAINER], width) ? [""] : [];
+	}
+
 	render(width: number): string[] {
 		const inner = Math.max(1, width - RAIL_WIDTH);
-		// The block adds no air of its own. A folded run is *smaller* than the cards it
-		// replaces, so any gap it wants has to come from somewhere: the header starts the
-		// block, the calls stack directly beneath it, and separation from the neighbours
-		// is whatever those neighbours already bring.
-		const lines: string[] = [this.header()];
+		// A folded run is *smaller* than the cards it replaces, so the gap Pi's cards would
+		// have provided has to be brought by the block itself (guarded against doubling).
+		const lines: string[] = [...this.airAbove(width), this.header()];
 
 		if (this.expandedState) {
 			for (const child of this.children) {
@@ -524,6 +534,12 @@ function moveToTail(children: any[], group: ToolGroupComponent): void {
 	children.push(group);
 }
 
+/** The group needs its container to space itself against the surrounding chat. */
+function rememberContainer(group: ToolGroupComponent, container: any): ToolGroupComponent {
+	(group as Record<PropertyKey, unknown>)[GROUP_CONTAINER] = container;
+	return group;
+}
+
 function groupTool(parent: any, component: ToolExecutionComponent, state: PatchState): void {
 	const children = parent?.children;
 	if (!Array.isArray(children)) return;
@@ -549,7 +565,7 @@ function groupTool(parent: any, component: ToolExecutionComponent, state: PatchS
 		children.splice(index, 1);
 		previous.addTool(component);
 		moveToTail(children, previous);
-		state.activeGroup = previous;
+		state.activeGroup = rememberContainer(previous, parent);
 		parent.invalidate?.();
 		return;
 	}
@@ -561,7 +577,7 @@ function groupTool(parent: any, component: ToolExecutionComponent, state: PatchS
 		group.addTool(component);
 		children[sibling.index] = group;
 		children.splice(index, 1);
-		state.activeGroup = group;
+		state.activeGroup = rememberContainer(group, parent);
 		parent.invalidate?.();
 		return;
 	}
@@ -570,7 +586,7 @@ function groupTool(parent: any, component: ToolExecutionComponent, state: PatchS
 	const group = new ToolGroupComponent();
 	group.addTool(component);
 	children[index] = group;
-	state.activeGroup = group;
+	state.activeGroup = rememberContainer(group, parent);
 	parent.invalidate?.();
 }
 
