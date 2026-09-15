@@ -4,3 +4,6 @@ node_modules/
 
 # Runtime mute state for lexlexlex-sound-on-complete
 lexlexlex-sound-on-complete/mute-state.json
+
+# Orca pane integration: local-only, never published from this repo
+orca-*.ts
