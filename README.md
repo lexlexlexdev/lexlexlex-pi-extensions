@@ -7,8 +7,8 @@ Personal extensions for the [pi coding agent](https://github.com/earendil-works/
 | `lexlexlex-permission-gates/` | Two-tier permission gates on bash commands & sensitive reads. Critical patterns (`rm -rf ~`, fork bombs, `dd`, `mkfs`) always blocked; risky patterns require user confirmation in safe mode, with per-session allowances and a `/gates` mode toggle. Matching is hardened against quote tricks and `sh -c` wrappers (see `SECURITY-REVIEW.md`). Owns the overridden `bash` tool, which carries an optional agent-supplied `explanation` shown in gate prompts and tool cards (advisory only, never blocks). |
 | `lexlexlex-tool-cards.ts` | Shared card renderers used by both tool-render and permission-gates (single source of truth for the UI). Library module — not an extension itself. |
 | `lexlexlex-tool-render.ts` | Custom compact "card" rendering for built-in tools (read/grep/find/ls). Skips tools owned by other extensions to avoid registration clobbering. |
-| `lexlexlex-tool-groups.ts` | Folds runs of consecutive tool calls into one collapsible block without owning any tool — it wraps the native `ToolExecutionComponent`s instead of re-registering the built-ins, so pi-code-previews, tool-render and permission-gates keep rendering their own cards. Mutations (`edit`/`write`, mutating shell commands) stay unfolded so their live previews keep painting. Config: `~/.pi/agent/tool-groups.json`. |
-| `lexlexlex-thinking-anim.ts` | Keeps the collapsed thinking label alive: `● Thinking... · 1,240 chars · 7s` while the model reasons, then freezes to `Thought for 7s`. Wall-clock driven off Pi's own repaints, so it adds no timers or requestRender plumbing. Config: `~/.pi/agent/thinking-anim.json`. |
+| `lexlexlex-tool-groups.ts` | Folds runs of consecutive tool calls into one collapsible block without owning any tool — it wraps the native `ToolExecutionComponent`s instead of re-registering the built-ins, so pi-code-previews, tool-render and permission-gates keep rendering their own cards. Mutations (`edit`/`write`, mutating shell commands) stay unfolded so their live previews keep painting. Spacing is owned here: a folded block adds no padding of its own — the header opens it and the call rows stack directly beneath, so the whole block is a tight N+1 lines and any gap around it comes from the neighbouring entries. Cards that bring no leading blank of their own get air when they render outside a fold. Config: `~/.pi/agent/tool-groups.json`. |
+| `lexlexlex-thinking-anim.ts` | Keeps the collapsed thinking label alive: `● Thinking... · 1,240 chars · 2 runs · 7s` while the model reasons, then freezes to `Thought for 12s · 3 runs`. One line per user exchange — the whole tool loop is rolled up and the line walks down to the newest message, so nothing stacks between tool cards. Wall-clock driven off Pi's own repaints, so it adds no timers or requestRender plumbing. Config: `~/.pi/agent/thinking-anim.json`. |
 | `lexlexlex-gcm/` | Git commit message generation. |
 | `lexlexlex-multicodex/` | Multiple ChatGPT Codex accounts with automatic quota rotation: imports the Codex auth pi already has, picks the best account per request, and switches + retries when one runs dry mid-session. `/multicodex` panel for accounts, usage and selection. Has its own README, schema and test suite. |
 | `lexlexlex-sound-on-complete/` | Plays a sound when the agent finishes. |
@@ -34,8 +34,15 @@ Clone and point your pi settings at the folders/files, e.g. in `~/.pi/agent/sett
   label to animate). Frames advance on Pi's existing ~80ms streaming repaints.
   Durations are deliberately not persisted, so a resumed session shows `Thought`;
   set `"finishedUnknownTemplate": ""` to keep Pi's own `Thinking...` there instead.
-  Config keys: `frames`, `colors`, `intervalMs`, `showElapsed`, `showChars`, `separator`,
-  `finishedTemplate` (`{duration}` → `7s` / `1m 30s`), `finishedUnknownTemplate`, `enabled`.
+  `rollUpTurns` (default `true`) keeps one line per user exchange: every reasoning run
+  of the exchange is counted into it, only the newest message carrying a label shows
+  it, and the older messages render nothing at all — their line and the blank line Pi
+  put around it go away, so a tool loop no longer stacks `Thought` lines. Set it to
+  `false` for one line per run. `showRuns` + `runsMin` control the `· 2 runs` metric
+  (default: shown from two runs on; `0` = always, `1` = also a single run).
+  Config keys: `frames`, `colors`, `intervalMs`, `showElapsed`, `showChars`, `showRuns`,
+  `runsMin`, `rollUpTurns`, `separator`, `finishedTemplate` (`{duration}` → `7s` /
+  `1m 30s`), `finishedUnknownTemplate`, `enabled`.
 - `permission-gates` is a guardrail against accidents, not a sandbox.
 - `permission-gates` overrides the built-in `bash` tool to carry a required
   agent-supplied `explanation` (shown in gate prompts and tool cards). Risky

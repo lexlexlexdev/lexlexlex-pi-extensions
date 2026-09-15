@@ -50,7 +50,7 @@
  */
 
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, ToolExecutionComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -190,6 +190,31 @@ function prepareRow(line: string): string {
 }
 
 /**
+ * Whether the entry above leaves a blank line for this one, i.e. whether it should
+ * bring its own air. Zero-height siblings (messages carrying nothing but a collapsed
+ * label) are skipped, so the answer further up still counts as the neighbour, and a
+ * block always answers "yes" without being rendered (it ends on a rail row).
+ */
+function needsAir(component: any, container: any, width: number): boolean {
+	const children = container?.children;
+	if (!Array.isArray(children)) return false;
+	const index = children.indexOf(component);
+	if (index < 0) return false;
+	// First row of a folded block sits directly under its header.
+	if (index === 0) return container instanceof ToolGroupComponent;
+
+	for (let i = index - 1; i >= 0; i--) {
+		const sibling = children[i];
+		if (sibling instanceof Spacer || sibling instanceof UserMessageComponent) return false;
+		if (sibling instanceof ToolGroupComponent) return true;
+		const rendered = safeRender(sibling, width);
+		if (rendered.length === 0) continue;
+		return safeStrip(rendered[rendered.length - 1] ?? "").trim() !== "";
+	}
+	return false;
+}
+
+/**
  * Collapsed representation of one tool: its renderer's first non-empty line,
  * plus — for risky calls — the renderer's own "why:" audit row, so an approval
  * reason stays visible while the block is folded.
@@ -302,6 +327,8 @@ function isComponentUnfolded(component: any): boolean {
 
 /** Back-pointer so removeChild() can find the group owning a tool. */
 const TOOL_PARENT = Symbol.for("lexlexlex.tool-groups.parent");
+/** The container a tool card lives in, so the card-air guard can see its siblings. */
+const TOOL_CONTAINER = Symbol.for("lexlexlex.tool-groups.tool-container");
 
 /**
  * A tool execution is done once Pi has pushed its final (non-partial) result.
@@ -357,6 +384,8 @@ class ToolGroupComponent extends Container {
 	addTool(tool: any): void {
 		this.children.push(tool);
 		(tool as Record<PropertyKey, unknown>)[TOOL_PARENT] = this;
+		// Cards space themselves against the container they are rendered in.
+		(tool as Record<PropertyKey, unknown>)[TOOL_CONTAINER] = this;
 		// A finished burst followed by new work restarts the clock for that burst.
 		const prior = this.children.slice(0, -1);
 		if (prior.length > 0 && prior.every((child) => childFinished(child))) {
@@ -407,6 +436,10 @@ class ToolGroupComponent extends Container {
 
 	render(width: number): string[] {
 		const inner = Math.max(1, width - RAIL_WIDTH);
+		// The block adds no air of its own. A folded run is *smaller* than the cards it
+		// replaces, so any gap it wants has to come from somewhere: the header starts the
+		// block, the calls stack directly beneath it, and separation from the neighbours
+		// is whatever those neighbours already bring.
 		const lines: string[] = [this.header()];
 
 		if (this.expandedState) {
@@ -440,6 +473,7 @@ class ToolGroupComponent extends Container {
 		if (later > 0) rows.push({ rail: "mid", text: fg("muted", `… +${later} more`) });
 		if (rows.length > 0) rows[rows.length - 1]!.rail = "tail";
 
+		// No air inside the block either: the header sits directly on the call rows.
 		for (const row of rows) {
 			const rail = row.rail === "tail" ? RAIL_TAIL : RAIL_MID;
 			lines.push(fg("dim", rail) + truncateToWidth(row.text, inner, "…"));
@@ -495,6 +529,7 @@ function groupTool(parent: any, component: ToolExecutionComponent, state: PatchS
 	if (!Array.isArray(children)) return;
 	const index = children.indexOf(component);
 	if (index < 0) return;
+	(component as Record<PropertyKey, unknown>)[TOOL_CONTAINER] = parent;
 
 	// Mutations (edit/write, git/npm/rm/… shell commands) stay outside the fold so
 	// their renderers keep streaming live output. They also close the open run, so
@@ -593,6 +628,62 @@ function installGrouping(): void {
 	prototype.removeChild = state.installed.removeChild;
 	prototype.clear = state.installed.clear;
 	host[PATCH_KEY] = state;
+
+	installCardAir();
+}
+
+type CardPatchState = {
+	original: { render: (...args: any[]) => any; handleMouse: (...args: any[]) => any };
+	installed: { render: (...args: any[]) => any; handleMouse: (...args: any[]) => any };
+};
+
+const CARD_PATCH_KEY = Symbol.for("lexlexlex.tool-groups.card-air");
+/** Set per render: this card prepended a blank line, so mouse rows shift by one. */
+const CARD_AIR_KEY = Symbol.for("lexlexlex.tool-groups.card-air-on");
+
+/**
+ * Tool cards carry their own air. Pi's native cards do (their shells push a leading
+ * ""), but the compact cards built by lexlexlex-tool-cards are `Text(text, 0, 0)` and
+ * start flush, which glues them to whatever sits above. Prepending the missing line at
+ * render time — instead of inside those cards — keeps the rule in one place and stops
+ * it from doubling up when the entry above already ends blank.
+ */
+function installCardAir(): void {
+	const host = globalThis as any;
+	const prototype = ToolExecutionComponent.prototype as any;
+	const previous = host[CARD_PATCH_KEY] as CardPatchState | undefined;
+
+	const originalRender =
+		previous && prototype.render === previous.installed.render ? previous.original.render : prototype.render;
+	const originalHandleMouse =
+		previous && prototype.handleMouse === previous.installed.handleMouse ? previous.original.handleMouse : prototype.handleMouse;
+
+	const installedRender = function (this: any, width: number) {
+		const lines = originalRender.call(this, width);
+		this[CARD_AIR_KEY] = false;
+		if (!Array.isArray(lines) || lines.length === 0) return lines;
+		// Renderer brought its own leading blank: nothing to add.
+		if (safeStrip(lines[0] ?? "").trim() === "") return lines;
+		if (!needsAir(this, (this as Record<PropertyKey, unknown>)[TOOL_CONTAINER], width)) return lines;
+		this[CARD_AIR_KEY] = true;
+		return ["", ...lines];
+	};
+
+	const installedHandleMouse = function (this: any, event: any) {
+		// Hit testing (self shell and Container child offsets) counts the card's own
+		// rows, so hide the extra line from it.
+		if (this[CARD_AIR_KEY] === true && typeof event?.y === "number" && event.y > 0) {
+			return originalHandleMouse.call(this, { ...event, y: event.y - 1 });
+		}
+		return originalHandleMouse.call(this, event);
+	};
+
+	prototype.render = installedRender;
+	prototype.handleMouse = installedHandleMouse;
+	host[CARD_PATCH_KEY] = {
+		original: { render: originalRender, handleMouse: originalHandleMouse },
+		installed: { render: installedRender, handleMouse: installedHandleMouse },
+	};
 }
 
 function sealActiveGroup(): void {
@@ -626,6 +717,8 @@ function unfoldLateMutation(toolCallId: unknown): void {
 	group.seal();
 	// The fold cannot stay "open" once a live mutation sits right after it.
 	state.activeGroup = undefined;
+	// Back out of the fold: the card now spaces against the chat container.
+	(component as Record<PropertyKey, unknown>)[TOOL_CONTAINER] = parent;
 
 	if (group.children.length === 0) {
 		children.splice(groupIndex, 1, component);

@@ -14,13 +14,19 @@
  * we call the original and then swap the inner Text for a self-updating one.
  * Streaming state comes from the component itself (`isStreaming`, set by
  * `updateContent(message, true)` during streaming and `false` when the message
- * finishes), so each thinking run has three states:
- *   - reasoning now      -> animated pulse + "· 1,240 chars · 12s"
- *   - reasoning finished -> "Thought for 7s" (duration frozen the moment thinking
- *                           stopped, so it never keeps ticking)
- *   - resumed session    -> "Thought" (nothing is persisted, so a reloaded session
- *                           has no timing data; set `finishedUnknownTemplate` to ""
- *                           to fall back to Pi's own label instead)
+ * finishes), so a line has three states:
+ *   - reasoning now      -> animated pulse + "· 1,240 chars · 2 runs · 12s"
+ *   - reasoning finished -> "Thought for 7s · 2 runs" (duration frozen the moment
+ *                           thinking stopped, so it never keeps ticking)
+ *   - resumed session    -> "Thought · 2 runs" (nothing is persisted, so a reloaded
+ *                           session has no timing data; set `finishedUnknownTemplate`
+ *                           to "" to fall back to Pi's own label instead)
+ *
+ * Roll-up: Pi emits one label per reasoning run, so a tool loop stacks them between
+ * tool cards ("Thought for 7s", tool, "Thought for 3s", tool, ...). Every run of one
+ * user exchange is instead rolled into a single line that walks down the exchange:
+ * only the newest message with reasoning carries it, earlier ones render nothing and
+ * their spacer goes with them. Set `rollUpTurns: false` for per-run lines again.
  *
  * Deliberately no persistence: appending durations to the session would put one
  * custom node per assistant message into /tree and into every fork of it.
@@ -38,7 +44,10 @@
  *     "showChars": true,                      // "· 1,240 chars"
  *     "separator": " · ",
  *     "finishedTemplate": "Thought for {duration}",   // after reasoning
- *     "finishedUnknownTemplate": "Thought"            // resumed sessions; "" = Pi's label
+ *     "finishedUnknownTemplate": "Thought",           // resumed sessions; "" = Pi's label
+ *     "rollUpTurns": true,                    // one line per user exchange
+ *     "showRuns": true,                       // "· 2 runs"
+ *     "runsMin": 2                            // ...from this many runs on
  *   }
  *
  * NOTE: frames advance only when Pi repaints. While streaming that is guaranteed
@@ -50,8 +59,12 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
-import { MouseRegion, Text, stripTerminalSequences } from "@earendil-works/pi-tui";
+import {
+	AssistantMessageComponent,
+	SkillInvocationMessageComponent,
+	UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
+import { Container, MouseRegion, Spacer, Text, stripTerminalSequences } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -72,6 +85,12 @@ type ThinkingAnimConfig = {
 	finishedTemplate: string;
 	/** Label when no duration was measured (resumed sessions). Empty = Pi's own label. */
 	finishedUnknownTemplate: string;
+	/** Roll every reasoning run of one user exchange (tool loop included) into one line. */
+	rollUpTurns: boolean;
+	/** Show "· 2 runs" next to the metrics. */
+	showRuns: boolean;
+	/** Minimum runs before the count is shown (0 = always, 1 = also for a single run). */
+	runsMin: number;
 };
 
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "thinking-anim.json");
@@ -85,6 +104,9 @@ const DEFAULT_CONFIG: ThinkingAnimConfig = {
 	separator: " · ",
 	finishedTemplate: "Thought for {duration}",
 	finishedUnknownTemplate: "Thought",
+	rollUpTurns: true,
+	showRuns: true,
+	runsMin: 2,
 };
 
 const config: ThinkingAnimConfig = { ...DEFAULT_CONFIG, frames: [...DEFAULT_CONFIG.frames], colors: [...DEFAULT_CONFIG.colors] };
@@ -115,6 +137,11 @@ function loadConfig(): void {
 			config.finishedTemplate = parsed.finishedTemplate;
 		}
 		if (typeof parsed.finishedUnknownTemplate === "string") config.finishedUnknownTemplate = parsed.finishedUnknownTemplate;
+		if (typeof parsed.rollUpTurns === "boolean") config.rollUpTurns = parsed.rollUpTurns;
+		if (typeof parsed.showRuns === "boolean") config.showRuns = parsed.showRuns;
+		if (typeof parsed.runsMin === "number" && Number.isFinite(parsed.runsMin)) {
+			config.runsMin = Math.max(0, Math.floor(parsed.runsMin));
+		}
 	} catch {
 		// Missing or malformed config: defaults are fine.
 	}
@@ -287,32 +314,88 @@ function formatCount(value: number): string {
 // Animated label component
 // =============================================================================
 
+function shouldShowRuns(count: number | undefined): boolean {
+	if (count === undefined || !config.showRuns) return false;
+	return config.runsMin === 0 ? count > 0 : count >= config.runsMin;
+}
+
+function formatRuns(count: number): string {
+	return `${count} run${count === 1 ? "" : "s"}`;
+}
+
+function metricSuffix(metrics: string[]): string {
+	return metrics.length > 0 ? config.separator + tint("dim", metrics.join(" · ")) : "";
+}
+
+/** `⠹ Thinking... · 1,240 chars · 2 runs · 12s` — the pulse plus whatever is live. */
+function liveLine(staticLabel: string, chars: number, runCount: number | undefined, elapsed: number): string {
+	const frames = config.frames.length > 0 ? config.frames : DEFAULT_CONFIG.frames;
+	const colors = config.colors.length > 0 ? config.colors : DEFAULT_CONFIG.colors;
+	const tick = Math.floor(Date.now() / Math.max(16, config.intervalMs));
+	const frame = frames[tick % frames.length] ?? "";
+	const dot = tint(colors[tick % colors.length] ?? "dim", frame);
+
+	const metrics: string[] = [];
+	if (config.showChars) metrics.push(`${formatCount(chars)} chars`);
+	if (shouldShowRuns(runCount)) metrics.push(formatRuns(runCount as number));
+	// Sub-second reasoning is the common case for cached prompts: "0s" is noise.
+	if (config.showElapsed && elapsed >= 1) metrics.push(`${elapsed}s`);
+
+	return `${dot} ${staticLabel}${metricSuffix(metrics)}`;
+}
+
+/** `Thought for 7s · 2 runs` — duration and count frozen at the moment reasoning stopped. */
+function finishedLine(staticLabel: string, totalMs: number | undefined, runCount: number | undefined): string {
+	const runsSuffix = shouldShowRuns(runCount) ? metricSuffix([formatRuns(runCount as number)]) : "";
+	// `undefined` means "nothing measured" (history); a measured 0ms still rounds up to 1s.
+	if (totalMs !== undefined) {
+		const text = config.finishedTemplate.replace("{duration}", formatDuration(totalMs));
+		return italic(tint("thinkingText", text)) + runsSuffix;
+	}
+	if (config.finishedUnknownTemplate.length > 0) {
+		return italic(tint("thinkingText", config.finishedUnknownTemplate)) + runsSuffix;
+	}
+	return staticLabel;
+}
+
+/** Totals for the whole exchange: completed runs plus the one currently reasoning. */
+function composeRollUp(batch: Batch, staticLabel: string): string {
+	let totalMs = 0;
+	let chars = 0;
+	let measured = false;
+	for (const run of batch.runs.values()) {
+		if (run.ms !== undefined) {
+			measured = true;
+			totalMs += run.ms;
+		}
+		chars += run.chars;
+	}
+
+	if (batch.liveKey !== undefined && batch.liveStart !== undefined) {
+		const elapsed = Math.floor((totalMs + Math.max(0, Date.now() - batch.liveStart)) / 1000);
+		return liveLine(staticLabel, chars, batch.runs.size, elapsed);
+	}
+	return finishedLine(staticLabel, measured ? totalMs : undefined, batch.runs.size);
+}
+
 function compose(owner: any, ordinal: number): string {
 	const label = labelOf(owner);
 	const staticLabel = italic(tint("thinkingText", label));
+
+	if (config.rollUpTurns) {
+		const batch = batches.get(exchangeOf(owner));
+		// Only the exchange's summary line renders; every other label is a leftover.
+		if (!batch || batch.owner !== owner || batch.ownerOrdinal !== ordinal) return "";
+		return composeRollUp(batch, staticLabel);
+	}
+
 	const runs = analyze(owner?.lastMessage);
-
 	if (isLive(owner, runs, ordinal)) {
-		const frames = config.frames.length > 0 ? config.frames : DEFAULT_CONFIG.frames;
-		const colors = config.colors.length > 0 ? config.colors : DEFAULT_CONFIG.colors;
-		const tick = Math.floor(Date.now() / Math.max(16, config.intervalMs));
-		const frame = frames[tick % frames.length] ?? "";
-		const dot = tint(colors[tick % colors.length] ?? "dim", frame);
-
-		const metrics: string[] = [];
-		if (config.showChars) metrics.push(`${formatCount(runs.chars[ordinal] ?? 0)} chars`);
-		// Sub-second reasoning is the common case for cached prompts: "0s" is noise.
-		const elapsed = elapsedSeconds(owner, ordinal);
-		if (config.showElapsed && elapsed >= 1) metrics.push(`${elapsed}s`);
-		const suffix = metrics.length > 0 ? config.separator + tint("dim", metrics.join(" · ")) : "";
-
-		return `${dot} ${staticLabel}${suffix}`;
+		return liveLine(staticLabel, runs.chars[ordinal] ?? 0, undefined, elapsedSeconds(owner, ordinal));
 	}
 
 	const done = doneDurations.get(owner)?.get(ordinal);
-	if (done !== undefined) {
-		return italic(tint("thinkingText", config.finishedTemplate.replace("{duration}", formatDuration(done))));
-	}
+	if (done !== undefined) return finishedLine(staticLabel, done, undefined);
 	if (config.finishedUnknownTemplate.length > 0) {
 		return italic(tint("thinkingText", config.finishedUnknownTemplate));
 	}
@@ -357,6 +440,176 @@ class AnimatedThinkingLabel extends Text {
 }
 
 // =============================================================================
+// Exchange roll-up
+// =============================================================================
+
+/**
+ * Pi emits one label per reasoning run, so a tool loop stacks them between tool
+ * cards. Instead, each run is counted into the user exchange it belongs to and only
+ * the newest message with reasoning carries the line — the previous carrier drops
+ * its labels. An exchange is delimited by user messages, which Pi adds to the chat
+ * container itself and a message component cannot see, so we watch
+ * `Container.addChild` (the technique lexlexlex-tool-groups uses too).
+ */
+type BatchRun = { chars: number; ms?: number };
+type Batch = {
+	/** Message whose label shows the exchange summary. */
+	owner?: object;
+	ownerOrdinal: number;
+	/** Keyed by `message:ordinal`, so re-decorating never double counts. */
+	runs: Map<string, BatchRun>;
+	liveKey?: string;
+	liveStart?: number;
+};
+
+const exchangeSeqs = new WeakMap<object, number>();
+const arrivalOrders = new WeakMap<object, number>();
+const batches = new Map<number, Batch>();
+let exchangeSeq = 0;
+let arrivalSeq = 0;
+
+function exchangeOf(owner: any): number {
+	let seq = exchangeSeqs.get(owner);
+	if (seq === undefined) {
+		// Assigned on first sight: for live messages that is after Pi added them to the
+		// chat, for replayed ones during construction — both in chronological order.
+		seq = exchangeSeq;
+		exchangeSeqs.set(owner, seq);
+	}
+	return seq;
+}
+
+function arrivalOf(owner: any): number {
+	if (!owner) return -1;
+	let order = arrivalOrders.get(owner);
+	if (order === undefined) {
+		order = arrivalSeq++;
+		arrivalOrders.set(owner, order);
+	}
+	return order;
+}
+
+function batchFor(exchange: number): Batch {
+	let batch = batches.get(exchange);
+	if (!batch) {
+		batch = { ownerOrdinal: -1, runs: new Map() };
+		batches.set(exchange, batch);
+	}
+	return batch;
+}
+
+function freezeLive(batch: Batch): void {
+	if (batch.liveKey !== undefined && batch.liveStart !== undefined) {
+		const run = batch.runs.get(batch.liveKey);
+		if (run && run.ms === undefined) run.ms = Math.max(0, Date.now() - batch.liveStart);
+	}
+	batch.liveKey = undefined;
+	batch.liveStart = undefined;
+}
+
+/**
+ * Count this message's runs exactly once and keep the exchange clock live. Returns
+ * the previous summary carrier when ownership moves, so its labels can be dropped.
+ */
+function trackBatch(owner: any, batch: Batch, runs: RunAnalysis): object | undefined {
+	const id = arrivalOf(owner);
+
+	for (let ordinal = 0; ordinal < runs.chars.length; ordinal++) {
+		const key = `${id}:${ordinal}`;
+		const chars = runs.chars[ordinal] ?? 0;
+		const run = batch.runs.get(key);
+		if (run) run.chars = chars;
+		else batch.runs.set(key, { chars });
+
+		if (isLive(owner, runs, ordinal)) {
+			if (batch.liveKey !== key) {
+				freezeLive(batch);
+				batch.liveKey = key;
+				batch.liveStart = Date.now();
+			}
+		} else if (batch.liveKey === key) {
+			// Reasoning stopped: answer text started, the message ended, or it aborted.
+			freezeLive(batch);
+		}
+	}
+
+	if (runs.chars.length === 0 || !canCarrySummary(owner)) return undefined;
+	if (arrivalOf(owner) <= arrivalOf(batch.owner)) return undefined;
+
+	const previous = batch.owner;
+	batch.owner = owner;
+	batch.ownerOrdinal = runs.chars.length - 1;
+	return previous;
+}
+
+/** Only a message with a collapsed label can host the summary line. */
+function canCarrySummary(owner: any): boolean {
+	const label = labelOf(owner);
+	let found = false;
+	forEachLabel(owner, (region) => {
+		if (!found && isHiddenThinkingLabel((region as any).child, label)) found = true;
+	});
+	return found;
+}
+
+/**
+ * Keep only the label at `keepOrdinal` (-1 = none). Dropped labels take one adjacent
+ * spacer with them, otherwise Pi's blank line between runs stays behind; a message
+ * left with nothing but spacers collapses to zero lines.
+ */
+function applyRollUpLayout(owner: any, keepOrdinal: number): void {
+	const container = owner?.contentContainer;
+	const children = container?.children;
+	if (!Array.isArray(children)) return;
+
+	const label = labelOf(owner);
+	const paddingX = paddingOf(owner);
+	const kept: any[] = [];
+	let ordinal = -1;
+
+	for (let i = 0; i < children.length; i++) {
+		const child = children[i];
+		if (!(child instanceof MouseRegion)) {
+			kept.push(child);
+			continue;
+		}
+		ordinal++;
+		const inner = (child as any).child;
+
+		// Expanded runs render Markdown, not a label: leave those exactly as they are.
+		if (!isHiddenThinkingLabel(inner, label)) {
+			kept.push(child);
+			continue;
+		}
+
+		if (ordinal !== keepOrdinal) {
+			if (children[i + 1] instanceof Spacer) i++;
+			else if (kept.length > 0 && kept[kept.length - 1] instanceof Spacer) kept.pop();
+			continue;
+		}
+
+		if (!(inner instanceof AnimatedThinkingLabel)) {
+			(child as any).child = new AnimatedThinkingLabel(owner, ordinal, paddingX);
+		}
+		kept.push(child);
+	}
+
+	const wanted = kept.every((child) => child instanceof Spacer) ? [] : kept;
+	if (wanted.length === children.length && children.every((child, index) => child === wanted[index])) return;
+	children.length = 0;
+	for (const child of wanted) children.push(child);
+	container.invalidate?.();
+}
+
+function decorateRollUp(owner: any, runs: RunAnalysis): void {
+	const batch = batchFor(exchangeOf(owner));
+	const previousOwner = trackBatch(owner, batch, runs);
+	if (previousOwner) applyRollUpLayout(previousOwner, -1);
+	const keep = batch.owner === owner && runs.chars.length > 0 ? batch.ownerOrdinal : -1;
+	applyRollUpLayout(owner, keep);
+}
+
+// =============================================================================
 // AssistantMessageComponent patch
 // =============================================================================
 
@@ -364,37 +617,90 @@ type PatchState = { original: (...args: any[]) => any; installed: (...args: any[
 const PATCH_KEY = Symbol.for("lexlexlex.thinking-anim.patch");
 
 function isHiddenThinkingLabel(inner: unknown, label: string): boolean {
+	// Already ours from an earlier pass: its text is the composed line, not Pi's label,
+	// so identity has to win over the text comparison.
+	if (inner instanceof AnimatedThinkingLabel) return true;
 	if (!(inner instanceof Text)) return false;
 	const text = stripTerminalSequences(String((inner as any).text ?? "")).trim();
 	return text.length > 0 && text === label.trim();
 }
 
-function decorate(owner: any): void {
-	if (!config.enabled) return;
+function paddingOf(owner: any): number {
+	const pad = Number(owner?.outputPad);
+	return Number.isFinite(pad) && pad >= 0 ? pad : 1;
+}
+
+/**
+ * Every thinking run contributes exactly one MouseRegion child (hidden Text or
+ * expanded Markdown), so counting them yields the same ordinal Pi used.
+ */
+function forEachLabel(owner: any, visit: (region: any, ordinal: number) => void): void {
 	const children = owner?.contentContainer?.children;
 	if (!Array.isArray(children)) return;
-
-	const runs = analyze(owner?.lastMessage);
-	syncRunState(owner, runs);
-
-	const label = labelOf(owner);
-	const pad = Number(owner?.outputPad);
-	const paddingX = Number.isFinite(pad) && pad >= 0 ? pad : 1;
-
-	// Every thinking run contributes exactly one MouseRegion child (hidden Text or
-	// expanded Markdown), so counting them yields the same ordinal Pi used.
 	let ordinal = -1;
 	for (const child of children) {
 		if (!(child instanceof MouseRegion)) continue;
 		ordinal++;
-		const inner = (child as any).child;
-		if (inner instanceof AnimatedThinkingLabel) continue;
-		if (!isHiddenThinkingLabel(inner, label)) continue;
-		(child as any).child = new AnimatedThinkingLabel(owner, ordinal, paddingX);
+		visit(child, ordinal);
 	}
 }
 
+function decorate(owner: any): void {
+	if (!config.enabled) return;
+	const runs = analyze(owner?.lastMessage);
+	if (config.rollUpTurns) decorateRollUp(owner, runs);
+	else decoratePerRun(owner, runs);
+}
+
+/** Per-run labels (roll-up off): one line per reasoning run, frozen per run. */
+function decoratePerRun(owner: any, runs: RunAnalysis): void {
+	syncRunState(owner, runs);
+	const label = labelOf(owner);
+	const paddingX = paddingOf(owner);
+	forEachLabel(owner, (region, ordinal) => {
+		const inner = (region as any).child;
+		if (inner instanceof AnimatedThinkingLabel) return;
+		if (!isHiddenThinkingLabel(inner, label)) return;
+		(region as any).child = new AnimatedThinkingLabel(owner, ordinal, paddingX);
+	});
+}
+
+type ContainerPatchState = { original: (...args: any[]) => any; installed: (...args: any[]) => any };
+const CONTAINER_PATCH_KEY = Symbol.for("lexlexlex.thinking-anim.container-patch");
+
+/** User messages are the exchange boundaries: bump the counter whenever one lands. */
+function installExchangeSniffer(): void {
+	const host = globalThis as Record<symbol, unknown>;
+	const prototype = Container.prototype as any;
+	const previous = host[CONTAINER_PATCH_KEY] as ContainerPatchState | undefined;
+
+	// Unwrap our own wrapper only — lexlexlex-tool-groups patches addChild too, and its
+	// closure must stay in the chain.
+	const original: (...args: any[]) => any =
+		previous && prototype.addChild === previous.installed ? previous.original : prototype.addChild;
+
+	const installed = function (this: any, component: any) {
+		const result = original.call(this, component);
+		try {
+			if (component instanceof UserMessageComponent || component instanceof SkillInvocationMessageComponent) {
+				exchangeSeq++;
+			}
+		} catch {
+			// Cosmetic bookkeeping must never break the chat.
+		}
+		return result;
+	};
+
+	prototype.addChild = installed;
+	host[CONTAINER_PATCH_KEY] = { original, installed };
+}
+
 function install(): void {
+	installUpdateContentPatch();
+	installExchangeSniffer();
+}
+
+function installUpdateContentPatch(): void {
 	const host = globalThis as Record<symbol, unknown>;
 	const prototype = AssistantMessageComponent.prototype as any;
 	const previous = host[PATCH_KEY] as PatchState | undefined;
