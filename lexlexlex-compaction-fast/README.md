@@ -65,11 +65,12 @@ MultiCodex applies.
 
 ## Failure visibility
 
-Warnings never write to the terminal: they go through `ctx.ui.notify()` and also sit in
-an editor-adjacent widget (`Compaction: ...`) until the next compaction attempt, so the
-reason survives the transcript redraw a successful compaction causes.
-`session_compact_failed` is handled too, so failures that happen before the compaction
-hook (for example active-model auth) still leave a visible line.
+Notices go through `ctx.ui.notify()`, which Pi renders inside the transcript: warnings as
+`Warning: ...`, failures as `Error: ...`, both above the composer and in the scrollback
+like any other chat line. Nothing writes to the terminal, and no widget is pinned next to
+the editor. A later successful compaction redraws the transcript from session entries and
+clears those lines; a note that must survive that would need a custom session entry plus
+an entry renderer. Aborted compactions stay silent.
 
 ## Verification
 

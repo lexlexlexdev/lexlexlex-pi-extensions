@@ -95,18 +95,31 @@ export interface CompactionModelConfig {
 
 type UnknownRecord = Record<string, unknown>;
 type Warn = (message: string) => void;
-const WARNING_WIDGET = "lexlexlex-compaction-fast-warning";
+type NoticeLevel = "warning" | "error";
 
-/** Console warnings corrupt an active TUI, and transcript notices vanish on compaction redraw. */
-function warn(ctx: ExtensionContext, message: string, error?: unknown): void {
+/**
+ * Pi renders a notification inside the transcript: `warning` and `error` become
+ * `Warning: ...` / `Error: ...` lines above the composer, so a compaction problem
+ * stays readable in the chat instead of fighting the TUI. A later successful
+ * compaction redraws the transcript from session entries and clears them, which
+ * is why nothing here pretends to be durable.
+ */
+function notice(ctx: ExtensionContext, level: NoticeLevel, message: string, error?: unknown): void {
   const detail = error instanceof Error ? error.message : error === undefined ? "" : String(error);
   const text = (detail ? `${message} ${detail}` : message).replace(/\s+/g, " ").slice(0, 500);
   if (ctx.hasUI) {
-    ctx.ui.notify(`[compaction-fast] ${text}`, "warning");
-    if (ctx.mode === "tui") ctx.ui.setWidget(WARNING_WIDGET, [`Compaction: ${text}`]);
+    ctx.ui.notify(`[compaction-fast] ${text}`, level);
   } else {
     console.warn(`[lexlexlex-compaction-fast] ${text}`);
   }
+}
+
+function warn(ctx: ExtensionContext, message: string, error?: unknown): void {
+  notice(ctx, "warning", message, error);
+}
+
+function fail(ctx: ExtensionContext, message: string, error?: unknown): void {
+  notice(ctx, "error", message, error);
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -364,7 +377,6 @@ function restorePreviousFileOperations(
 
 export default function compactionModelFast(pi: ExtensionAPI): void {
   pi.on("session_before_compact", async (event, ctx) => {
-    if (ctx.mode === "tui") ctx.ui.setWidget(WARNING_WIDGET, undefined);
     const config = loadConfig(ctx);
     if (!config || !config.reasons.includes(event.reason)) return;
 
@@ -424,18 +436,9 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
       return { compaction: applyCodexFastCost(model, result, serviceTier) };
     } catch (error) {
       if (!event.signal?.aborted) {
-        warn(ctx, `Compaction with ${config.model} failed; using Pi's active model.`, error);
+        fail(ctx, `Compaction with ${config.model} failed; using Pi's active model.`, error);
       }
       return;
     }
-  });
-
-  // Pi can fail before session_before_compact (e.g. active-model auth). Keep that
-  // error visible even if its chat notice would be lost in the next redraw.
-  pi.on("session_compact_failed", (event, ctx) => {
-    if (!event.errorMessage || ctx.mode !== "tui") return;
-    const config = loadConfig(ctx);
-    if (!config || !config.reasons.includes(event.reason)) return;
-    ctx.ui.setWidget(WARNING_WIDGET, [`Compaction: ${event.errorMessage.replace(/\s+/g, " ").slice(0, 500)}`]);
   });
 }
