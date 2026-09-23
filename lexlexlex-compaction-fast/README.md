@@ -63,6 +63,18 @@ Tier injection is skipped for model APIs that do not carry `service_tier`.
 for the official `chatgpt.com` endpoint and an advertised model id, the same guard
 MultiCodex applies.
 
+## Indicator
+
+While a compaction of this extension runs, the spinner line names the model and the tier:
+`Compacting with openai-codex/gpt-6-luna (fast)... (esc to cancel)`. Pi builds that line —
+and its overflow/auto wording — inside its own indicator, which is not reachable from the
+extension UI context, so the extension wraps `Loader.updateDisplay()` from
+`@earendil-works/pi-tui`: that method reads `this.message` on every paint and the spinner
+repaints on its own interval. The wrapper only touches labels that start with
+`Compacting context`, `Auto-compacting`, or `Context overflow detected`, and only while a
+compaction of ours is in flight; everything else renders as Pi wrote it. Pi composes the
+first frames before this extension's hook runs, so they still read as Pi's plain text.
+
 ## Failure visibility
 
 Notices go through `ctx.ui.notify()`, which Pi renders inside the transcript: warnings as
@@ -83,3 +95,5 @@ fake `pi.on`, and drive a manual compaction with `globalThis.fetch` stubbed:
 - an invalid tier warns in the UI and falls back to the standard tier
 - the stream is requested from `ctx.modelRegistry`, so a provider wrapper owns auth
 - `applyCodexFastCost` restates GPT-6 summary usage at 2.5x and GPT-5.4 at 2x
+- the compacting spinner names the model and appends `(fast)` for a fast tier, without
+  altering other loaders

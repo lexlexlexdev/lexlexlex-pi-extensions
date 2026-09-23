@@ -29,6 +29,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { calculateCost, type Api, type Model } from "@earendil-works/pi-ai";
+import { Loader } from "@earendil-works/pi-tui";
 
 export const COMPACTION_REASONS = ["manual", "threshold", "overflow"] as const;
 export type CompactionReason = (typeof COMPACTION_REASONS)[number];
@@ -124,6 +125,62 @@ function fail(ctx: ExtensionContext, message: string, error?: unknown): void {
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The line Pi shows while a compaction runs ("Compacting context... (esc to
+ * cancel)") is built inside Pi's own `CompactionStatusIndicator`, whose message
+ * is not reachable from the public extension UI context. `Loader.updateDisplay`
+ * reads `this.message` on every paint and is resolved through the prototype, so
+ * wrapping that one method is enough to relabel the indicator while it spins —
+ * the spinner repaints on its own interval, so no extra render request is
+ * needed. The wrapper is inert unless a compaction of ours is in flight.
+ */
+const loaderPrototype = Loader.prototype as unknown as {
+  updateDisplay: (this: { message?: unknown }, ...args: unknown[]) => unknown;
+  __compactionFastLabeling?: boolean;
+};
+
+let indicatorLabel: string | undefined;
+
+export function setCompactionIndicatorLabel(label: string | undefined): void {
+  indicatorLabel = label;
+}
+
+function isCompactionMessage(message: string): boolean {
+  return (
+    message.startsWith("Compacting context") ||
+    message.startsWith("Auto-compacting") ||
+    message.startsWith("Context overflow detected")
+  );
+}
+
+function describeCompactionMessage(message: string, descriptor: string): string {
+  if (message.startsWith("Compacting context")) {
+    return message.replace("Compacting context", `Compacting with ${descriptor}`);
+  }
+  return message.replace("Auto-compacting", `Auto-compacting with ${descriptor}`);
+}
+
+export function installCompactionIndicatorLabeling(): void {
+  if (loaderPrototype.__compactionFastLabeling) return;
+  const original = loaderPrototype.updateDisplay;
+  if (typeof original !== "function") return;
+
+  loaderPrototype.__compactionFastLabeling = true;
+  loaderPrototype.updateDisplay = function (this: { message?: unknown }, ...args: unknown[]) {
+    const label = indicatorLabel;
+    const message = this.message;
+    if (!label || typeof message !== "string" || !isCompactionMessage(message)) {
+      return original.apply(this, args);
+    }
+    this.message = describeCompactionMessage(message, label);
+    try {
+      return original.apply(this, args);
+    } finally {
+      this.message = message;
+    }
+  };
 }
 
 /**
@@ -376,6 +433,8 @@ function restorePreviousFileOperations(
 }
 
 export default function compactionModelFast(pi: ExtensionAPI): void {
+  installCompactionIndicatorLabeling();
+
   pi.on("session_before_compact", async (event, ctx) => {
     const config = loadConfig(ctx);
     if (!config || !config.reasons.includes(event.reason)) return;
@@ -403,7 +462,12 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
         ? requestServiceTier(config.serviceTier, model)
         : undefined;
 
+    // Label the spinner with what is actually about to run. Pi builds that line
+    // before this hook fires, so the first frames still read as Pi wrote them.
+    const descriptor = `${model.provider}/${model.id}${serviceTier ? " (fast)" : ""}`;
+
     try {
+      setCompactionIndicatorLabel(descriptor);
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       // Codex requests are authenticated by the provider at request time - a
       // wrapper such as MultiCodex rotates managed accounts and refreshes its
@@ -439,6 +503,8 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
         fail(ctx, `Compaction with ${config.model} failed; using Pi's active model.`, error);
       }
       return;
+    } finally {
+      setCompactionIndicatorLabel(undefined);
     }
   });
 }
