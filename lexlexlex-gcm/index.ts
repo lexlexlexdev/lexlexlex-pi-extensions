@@ -11,8 +11,9 @@ import {
   SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
+  type MessageRenderer,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -583,6 +584,90 @@ function clearGcmWidget(ctx: ExtensionContext): void {
   ctx.ui.setWidget(WIDGET_KEY, undefined);
 }
 
+/** Details carried by a report entry; the widget's facts, minus the live bits. */
+type ReportDetails = {
+  repoName?: string;
+  branchUsed?: string;
+  branchStatus?: string;
+  commits?: CommitItem[];
+  model?: string;
+  fast?: boolean;
+  thinking?: string;
+  elapsedMs?: number;
+  errorCode?: string;
+};
+
+type ReportTheme = Parameters<MessageRenderer<ReportDetails>>[2];
+
+const REPORT_LABEL_WIDTH = 6;
+const REPORT_COMMIT_CAP = 6;
+
+/** `label  value`, the value truncated and colored, the label dim. */
+function reportRow(
+  theme: ReportTheme,
+  label: string,
+  value: string,
+  inner: number,
+  color: Parameters<ReportTheme["fg"]>[0] = "text",
+): string {
+  const head = theme.fg("dim", label.padEnd(REPORT_LABEL_WIDTH));
+  const room = Math.max(1, inner - REPORT_LABEL_WIDTH - 2);
+  return `${head}  ${truncateToWidth(theme.fg(color, value), room, "…")}`;
+}
+
+/**
+ * Bordered, width-aware card for a finished run: what ran, on which repo, and
+ * what came out of it. Rows are padded against `visibleWidth`, so the right-hand
+ * border stays straight whatever colors or glyphs a row carries.
+ */
+function gcmReportCard(theme: ReportTheme, details: ReportDetails | undefined): Component {
+  const commits = details?.commits ?? [];
+  const qualifiers = [
+    details?.fast ? "fast" : undefined,
+    details?.thinking ? `thinking ${details.thinking}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  const model = details?.model ? `${details.model}${qualifiers.length > 0 ? ` (${qualifiers.join(", ")})` : ""}` : undefined;
+  const repoFacts = [details?.repoName, details?.branchUsed, details?.branchStatus].filter(
+    (part): part is string => Boolean(part),
+  );
+
+  return {
+    // A static card: nothing to invalidate when the terminal resizes.
+    invalidate() {},
+    render(width: number): string[] {
+      const inner = Math.max(1, width - 4);
+      const rows: string[] = [];
+      if (model) rows.push(reportRow(theme, "model", model, inner));
+      if (repoFacts.length > 0) rows.push(reportRow(theme, "repo", repoFacts.join(" · "), inner));
+      if (typeof details?.elapsedMs === "number") rows.push(reportRow(theme, "took", formatDuration(details.elapsedMs), inner));
+      if (details?.errorCode) rows.push(reportRow(theme, "error", details.errorCode, inner, "error"));
+
+      if (commits.length > 0) {
+        rows.push("");
+        for (const commit of commits.slice(0, REPORT_COMMIT_CAP)) {
+          rows.push(`${theme.fg("accent", "◆")} ${theme.fg("dim", commit.hash.padEnd(7))}  ${theme.fg("text", commit.message)}`);
+        }
+        const hidden = commits.length - Math.min(commits.length, REPORT_COMMIT_CAP);
+        if (hidden > 0) rows.push(theme.fg("muted", `… +${hidden} more`));
+      }
+      if (rows.length === 0) rows.push(theme.fg("dim", "nothing to report"));
+
+      const border = (text: string) => theme.fg("dim", text);
+      const lines: string[] = [];
+      const titlePlain = "GCM Report";
+      lines.push(`${border("╭─ ")}${theme.fg("accent", theme.bold(titlePlain))}${border(` ${"─".repeat(Math.max(0, width - titlePlain.length - 5))}╮`)}`);
+      for (const row of rows) {
+        const text = row === "" ? "" : truncateToWidth(row, inner, "…");
+        lines.push(`${border("│")} ${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))} ${border("│")}`);
+      }
+      const footerPlain = ` ${commits.length > 0 ? `${commits.length} commit${commits.length === 1 ? "" : "s"}` : details?.errorCode ? "failed" : "nothing to report"} `;
+      const fill = Math.max(0, width - footerPlain.length - 4);
+      lines.push(`${border(`╰─${"─".repeat(fill + 1)}`)}${theme.fg("dim", footerPlain)}${border("╯")}`);
+      return lines;
+    },
+  };
+}
+
 /**
  * Durable transcript entry for a finished run, whether it committed or failed.
  * Reports are entries, not notices, so they survive the redraw that follows and
@@ -827,51 +912,9 @@ async function runGcm(
 }
 
 export default function gcmExtension(pi: ExtensionAPI) {
-  pi.registerMessageRenderer(GCM_REPORT_TYPE, (message, _options, theme) => {
-    const details = message.details as
-      | {
-          repoName?: string;
-          branchUsed?: string;
-          branchStatus?: string;
-          commits?: CommitItem[];
-          model?: string;
-          fast?: boolean;
-          thinking?: string;
-          elapsedMs?: number;
-          errorCode?: string;
-        }
-      | undefined;
-    const commits = details?.commits || [];
-
-    let out = theme.fg("accent", theme.bold("GCM Report"));
-    if (details?.model) {
-      const knobs = [details.fast ? "fast" : undefined, details.thinking ? `thinking ${details.thinking}` : undefined].filter(
-        (part): part is string => Boolean(part),
-      );
-      out += `\n${theme.fg("dim", "model:")} ${theme.fg("text", `${details.model}${knobs.length > 0 ? ` (${knobs.join(", ")})` : ""}`)}`;
-    }
-    if (details?.repoName) out += `\n${theme.fg("dim", "repo:")} ${theme.fg("text", details.repoName)}`;
-    if (details?.branchUsed) out += `\n${theme.fg("dim", "branch:")} ${theme.fg("text", details.branchUsed)}`;
-    if (details?.branchStatus) out += `\n${theme.fg("dim", "status:")} ${theme.fg("text", details.branchStatus)}`;
-    if (typeof details?.elapsedMs === "number") {
-      out += `\n${theme.fg("dim", "took:")} ${theme.fg("text", formatDuration(details.elapsedMs))}`;
-    }
-    if (details?.errorCode) {
-      out += `\n${theme.fg("dim", "failed:")} ${theme.fg("error", details.errorCode)}`;
-    }
-    if (commits.length === 0) {
-      out += `\n${theme.fg("dim", details?.errorCode ? "No commits were created" : "No commits to report")}`;
-      return new Text(out, 0, 0);
-    }
-
-    for (const [idx, c] of commits.entries()) {
-      out += `\n${theme.fg("muted", `#${idx + 1}`)}`;
-      out += `\n${theme.fg("dim", "branch:")} ${theme.fg("text", c.branch)}`;
-      out += `\n${theme.fg("dim", "message:")} ${theme.fg("text", c.message)}`;
-      out += `\n${theme.fg("dim", "hash:")} ${theme.fg("text", c.hash)}`;
-    }
-    return new Text(out, 0, 0);
-  });
+  pi.registerMessageRenderer(GCM_REPORT_TYPE, (message, _options, theme) =>
+    gcmReportCard(theme, message.details as ReportDetails | undefined),
+  );
 
   pi.registerTool({
     name: "get_commit_message",
