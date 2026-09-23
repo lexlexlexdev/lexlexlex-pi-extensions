@@ -28,7 +28,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { streamSimple } from "@earendil-works/pi-ai";
+import { calculateCost, type Api, type Model } from "@earendil-works/pi-ai";
 
 export const COMPACTION_REASONS = ["manual", "threshold", "overflow"] as const;
 export type CompactionReason = (typeof COMPACTION_REASONS)[number];
@@ -50,9 +50,8 @@ export type ServiceTier = (typeof SERVICE_TIERS)[number];
 /**
  * APIs whose request builder forwards a service tier into the request body
  * (see pi-ai `api/openai-responses.js` and `api/openai-codex-responses.js`).
- * The ChatGPT codex backend is a subscription endpoint, not the OpenAI
- * platform API, so `openai-codex` stays out even though its API module would
- * accept the field.
+ * The ChatGPT Codex backend behind `openai-codex` accepts `priority` as well —
+ * that is what MultiCodex's `/fast` sends — so both endpoints qualify here.
  */
 const SERVICE_TIER_APIS = new Set<string>([
   "openai-responses",
@@ -60,8 +59,31 @@ const SERVICE_TIER_APIS = new Set<string>([
   "openai-codex-responses",
 ]);
 
-function supportsServiceTier(model: { api: string; provider: string }): boolean {
-  return SERVICE_TIER_APIS.has(model.api) && model.provider !== "openai-codex";
+function supportsServiceTier(model: Model<Api>): boolean {
+  if (!SERVICE_TIER_APIS.has(model.api)) return false;
+  return model.api === "openai-codex-responses" ? isOfficialCodexModel(model) : true;
+}
+
+/**
+ * Only the official ChatGPT Codex endpoint accepts a Codex service tier, and only
+the advertised model ids carry the Fast credit multipliers. Mirrors
+`isOfficialCodexModel` and `CODEX_FAST_MODEL_IDS` in `lexlexlex-multicodex/fast.ts`.
+ */
+export function isOfficialCodexModel(model: Model<Api>): boolean {
+  if (model.provider !== "openai-codex" || model.api !== "openai-codex-responses") return false;
+  try {
+    return new URL(String(model.baseUrl)).origin === "https://chatgpt.com";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `fast` and `priority` name the same tier. Sending `priority` keeps Pi's own
+ * Codex accounting in step, since its multiplier table only knows that value.
+ */
+export function requestServiceTier(serviceTier: ServiceTier, model: Model<Api>): ServiceTier {
+  return serviceTier === "fast" && model.provider === "openai-codex" ? "priority" : serviceTier;
 }
 
 export interface CompactionModelConfig {
@@ -73,17 +95,36 @@ export interface CompactionModelConfig {
 
 type UnknownRecord = Record<string, unknown>;
 type Warn = (message: string) => void;
+const WARNING_WIDGET = "lexlexlex-compaction-fast-warning";
 
-function warn(message: string, error?: unknown): void {
-  if (error === undefined) {
-    console.warn(`[lexlexlex-compaction-fast] ${message}`);
+/** Console warnings corrupt an active TUI, and transcript notices vanish on compaction redraw. */
+function warn(ctx: ExtensionContext, message: string, error?: unknown): void {
+  const detail = error instanceof Error ? error.message : error === undefined ? "" : String(error);
+  const text = (detail ? `${message} ${detail}` : message).replace(/\s+/g, " ").slice(0, 500);
+  if (ctx.hasUI) {
+    ctx.ui.notify(`[compaction-fast] ${text}`, "warning");
+    if (ctx.mode === "tui") ctx.ui.setWidget(WARNING_WIDGET, [`Compaction: ${text}`]);
   } else {
-    console.warn(`[lexlexlex-compaction-fast] ${message}`, error);
+    console.warn(`[lexlexlex-compaction-fast] ${text}`);
   }
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Drop null-valued header entries. pi's provider auth resolves a missing header
+ * to null to mark it deleted, and `compact()` takes a plain string map.
+ */
+function definedHeaders(
+  headers: Record<string, string | null> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const defined = Object.entries(headers).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string",
+  );
+  return defined.length > 0 ? Object.fromEntries(defined) : undefined;
 }
 
 function section(settings: unknown): unknown {
@@ -173,6 +214,7 @@ export function loadConfig(ctx: ExtensionContext): CompactionModelConfig | null 
   return resolveConfig(
     settings.getGlobalSettings(),
     ctx.isProjectTrusted() ? settings.getProjectSettings() : undefined,
+    (message) => warn(ctx, message),
   );
 }
 
@@ -186,22 +228,55 @@ export function parseModelReference(reference: string): { provider: string; mode
 }
 
 type CompactStreamFn = NonNullable<Parameters<typeof compact>[7]>;
-type StreamRequestOptions = NonNullable<Parameters<typeof streamSimple>[2]>;
+type RegistryStreamOptions = NonNullable<
+  Parameters<ExtensionContext["modelRegistry"]["streamSimple"]>[2]
+>;
 
 /**
- * Hand Pi's compaction summarization a stream that carries the service tier.
- *
- * `options.serviceTier` cannot be used here: the provider's `streamSimple`
- * rebuilds the option bag through `buildBaseOptions`, which whitelists fields
- * and drops anything else. `onPayload` is on that whitelist and is applied to
- * the request body right before it is sent, so the tier rides along while
- * everything else stays on Pi's normal summarization path. Pi's own cost
- * accounting then picks the tier up from the response (`service_tier`), which
- * is why `priority` is the default tier to send: it is the value Pi's cost
- * multiplier recognizes as 2x.
+ * Codex Fast bills 2.5x Standard credits for the GPT-6, GPT-5.6, and GPT-5.5
+ * families and 2x for GPT-5.4. Mirrors `codexFastCreditMultiplier` in
+ * `lexlexlex-multicodex/fast.ts`, which owns the same table for session
+ * requests; Pi's own Codex adapter only knows a flat 2x.
  */
-export function createServiceTierStream(serviceTier: ServiceTier): CompactStreamFn {
+export const CODEX_FAST_CREDIT_MULTIPLIERS: Readonly<Record<string, number>> = {
+  "gpt-5.4": 2,
+  "gpt-5.5": 2.5,
+  "gpt-5.6-luna": 2.5,
+  "gpt-5.6-sol": 2.5,
+  "gpt-5.6-terra": 2.5,
+  "gpt-6-astra": 2.5,
+  "gpt-6-luna": 2.5,
+  "gpt-6-sol": 2.5,
+};
+
+const DEFAULT_CODEX_FAST_CREDIT_MULTIPLIER = 2.5;
+
+export function codexFastCreditMultiplier(modelId: string): number {
+  return CODEX_FAST_CREDIT_MULTIPLIERS[modelId] ?? DEFAULT_CODEX_FAST_CREDIT_MULTIPLIER;
+}
+
+/**
+ * Route the summarization request through Pi's model runtime instead of calling
+ * pi-ai's `streamSimple` directly.
+ *
+ * Auth and transport stay with the registered provider, so a wrapper such as
+ * MultiCodex rotates ChatGPT Codex accounts and refreshes its OAuth tokens for
+ * this request exactly as it does for session requests: `openai-codex/gpt-6-luna`
+ * needs no OpenAI API key. The service tier still cannot travel as
+ * `options.serviceTier`, because the provider's `streamSimple` rebuilds the
+ * option bag through `buildBaseOptions`, which whitelists fields and drops
+ * anything else; `onPayload` is on that whitelist and runs on the request body
+ * right before it is sent.
+ */
+export function createCompactionStream(
+  ctx: ExtensionContext,
+  serviceTier?: ServiceTier,
+): CompactStreamFn {
   return (model, context, options) => {
+    if (!serviceTier) {
+      return ctx.modelRegistry.streamSimple(model, context, options as RegistryStreamOptions);
+    }
+
     const previousOnPayload = options?.onPayload;
     const requestOptions = {
       ...options,
@@ -209,9 +284,48 @@ export function createServiceTierStream(serviceTier: ServiceTier): CompactStream
         const base = ((await previousOnPayload?.(payload, target)) ?? payload) as Record<string, unknown>;
         return { ...base, service_tier: serviceTier };
       },
-    } as StreamRequestOptions;
-    return streamSimple(model, context, requestOptions);
+    } as RegistryStreamOptions;
+    return ctx.modelRegistry.streamSimple(model, context, requestOptions);
   };
+}
+
+/**
+ * Pi's Codex adapter prices a `priority` request at a flat 2x, but Fast billing
+ * is 2.5x for GPT-6, GPT-5.6, and GPT-5.5 and 2x for GPT-5.4, and the adapter
+ * only applies a multiplier when the tier travelled through
+ * `options.serviceTier`, which the provider drops. Recompute the summary cost
+ * from the model's own rates and apply the real multiplier, the way MultiCodex
+ * corrects session messages.
+ */
+export function applyCodexFastCost<T extends { usage?: unknown }>(
+  model: Model<Api>,
+  result: T,
+  serviceTier: ServiceTier | undefined,
+): T {
+  if (serviceTier !== "priority" && serviceTier !== "fast") return result;
+  if (!isOfficialCodexModel(model)) return result;
+  if (!(model.id in CODEX_FAST_CREDIT_MULTIPLIERS)) return result;
+
+  const usage = isRecord(result.usage) ? result.usage : undefined;
+  const cost = usage && isRecord(usage.cost) ? usage.cost : undefined;
+  if (
+    !usage ||
+    !cost ||
+    !["input", "output", "cacheRead", "cacheWrite"].every(
+      (key) => typeof usage[key] === "number" && Number.isFinite(usage[key]),
+    )
+  ) {
+    return result;
+  }
+
+  const correctedUsage = structuredClone(usage);
+  calculateCost(model, correctedUsage as never);
+  const correctedCost = (correctedUsage as { cost: Record<string, number> }).cost;
+  const multiplier = codexFastCreditMultiplier(model.id);
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
+    correctedCost[key] *= multiplier;
+  }
+  return { ...result, usage: correctedUsage };
 }
 
 /**
@@ -250,32 +364,46 @@ function restorePreviousFileOperations(
 
 export default function compactionModelFast(pi: ExtensionAPI): void {
   pi.on("session_before_compact", async (event, ctx) => {
+    if (ctx.mode === "tui") ctx.ui.setWidget(WARNING_WIDGET, undefined);
     const config = loadConfig(ctx);
     if (!config || !config.reasons.includes(event.reason)) return;
 
     const reference = parseModelReference(config.model);
     if (!reference) {
-      warn(`Invalid model '${config.model}'; expected provider/model. Using Pi's active model.`);
+      warn(ctx, `Invalid model '${config.model}'; expected provider/model. Using Pi's active model.`);
       return;
     }
 
     const model = ctx.modelRegistry.find(reference.provider, reference.modelId);
     if (!model) {
-      warn(`Model not found: ${config.model}. Using Pi's active model.`);
+      warn(ctx, `Model not found: ${config.model}. Using Pi's active model.`);
       return;
     }
 
     if (config.serviceTier && !supportsServiceTier(model)) {
       warn(
+        ctx,
         `serviceTier '${config.serviceTier}' is not forwarded for ${model.provider}/${model.id} (api '${model.api}'); using the standard tier.`,
       );
     }
-    const serviceTier = config.serviceTier && supportsServiceTier(model) ? config.serviceTier : undefined;
+    const serviceTier =
+      config.serviceTier && supportsServiceTier(model)
+        ? requestServiceTier(config.serviceTier, model)
+        : undefined;
 
     try {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok) {
-        warn(`Authentication failed for ${config.model}: ${auth.error}. Using Pi's active model.`);
+      // Codex requests are authenticated by the provider at request time - a
+      // wrapper such as MultiCodex rotates managed accounts and refreshes its
+      // own OAuth tokens - so a stale stored Codex credential must not veto the
+      // route here. Other providers keep the preflight, which turns a missing
+      // credential into one clear message instead of a stream error.
+      if (!auth.ok && model.provider !== "openai-codex") {
+        const hint =
+          model.provider === "openai"
+            ? " Run /login openai for an API key, or point compactionModel at openai-codex/<model> to use MultiCodex accounts."
+            : "";
+        warn(ctx, `Authentication failed for ${config.model}: ${auth.error}. Using Pi's active model.${hint}`);
         return;
       }
 
@@ -284,21 +412,30 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
       const result = await compact(
         event.preparation,
         model,
-        auth.apiKey,
-        auth.headers,
+        auth.ok ? auth.apiKey : undefined,
+        auth.ok ? definedHeaders(auth.headers) : undefined,
         event.customInstructions,
         event.signal,
         config.thinkingLevel,
-        serviceTier ? createServiceTierStream(serviceTier) : undefined,
-        auth.env,
+        createCompactionStream(ctx, serviceTier),
+        auth.ok ? auth.env : undefined,
       );
 
-      return { compaction: result };
+      return { compaction: applyCodexFastCost(model, result, serviceTier) };
     } catch (error) {
       if (!event.signal?.aborted) {
-        warn(`Compaction with ${config.model} failed; using Pi's active model.`, error);
+        warn(ctx, `Compaction with ${config.model} failed; using Pi's active model.`, error);
       }
       return;
     }
+  });
+
+  // Pi can fail before session_before_compact (e.g. active-model auth). Keep that
+  // error visible even if its chat notice would be lost in the next redraw.
+  pi.on("session_compact_failed", (event, ctx) => {
+    if (!event.errorMessage || ctx.mode !== "tui") return;
+    const config = loadConfig(ctx);
+    if (!config || !config.reasons.includes(event.reason)) return;
+    ctx.ui.setWidget(WARNING_WIDGET, [`Compaction: ${event.errorMessage.replace(/\s+/g, " ").slice(0, 500)}`]);
   });
 }

@@ -1,6 +1,6 @@
 {
   "compactionModel": {
-    "model": "openai/gpt-6-luna",
+    "model": "openai-codex/gpt-6-luna",
     "thinkingLevel": "high",
     "serviceTier": "priority"
   },
@@ -34,7 +34,8 @@
     "extensions/lexlexlex-multicodex",
     "npm:@tintinweb/pi-subagents",
     "~/.pi/agent/extensions/lexlexlex-compaction-fast",
-    "npm:pi-caveman"
+    "npm:pi-caveman",
+    "extensions/secret-mask"
   ],
   "hideThinkingBlock": true,
   "enabledModels": [
