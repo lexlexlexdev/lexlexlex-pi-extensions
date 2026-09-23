@@ -157,6 +157,8 @@ export type GcmProgress = {
   startedAt: number;
   chars: number;
   reportedTokens: number;
+  /** Last time a tick was published, for throttling (no timers involved). */
+  lastTickAt?: number;
 };
 
 export function beginProgress(ref: GcmModelRef, fast: boolean, phase = "starting"): GcmProgress {
@@ -168,6 +170,7 @@ export function setProgressPhase(progress: GcmProgress, phase: string): void {
   progress.chars = 0;
   progress.reportedTokens = 0;
   progress.startedAt = Date.now();
+  progress.lastTickAt = undefined;
 }
 
 export function progressTokens(progress: GcmProgress): number {
@@ -188,10 +191,16 @@ export function formatProgress(progress: GcmProgress, now = Date.now()): string 
   return `${progress.ref}${tier} · ${progress.phase} · ${estimated}${formatCount(tokens)} tok · ${elapsed}`;
 }
 
-/** Count text and thinking deltas, and adopt real usage once the provider sends it. */
+/**
+ * Count text and thinking deltas, adopt real usage once the provider sends it,
+ * and tick the caller while the model is talking. The tick is driven by the
+ * stream itself and throttled, so live progress needs no timer of ours.
+ */
 export function observeStream(
   stream: { push: (event: AssistantMessageEvent) => void },
   progress: GcmProgress,
+  onTick?: () => void,
+  tickIntervalMs = 200,
 ): void {
   if (typeof stream.push !== "function") return;
   const originalPush = stream.push;
@@ -205,6 +214,14 @@ export function observeStream(
     const output = usage?.output;
     if (typeof output === "number" && Number.isFinite(output) && output > 0) {
       progress.reportedTokens = Math.max(progress.reportedTokens, output);
+    }
+
+    if (onTick) {
+      const now = Date.now();
+      if (progress.lastTickAt === undefined || now - progress.lastTickAt >= tickIntervalMs) {
+        progress.lastTickAt = now;
+        onTick();
+      }
     }
     return originalPush.call(this, event);
   };
@@ -231,6 +248,8 @@ type AskContext = {
   tier: ServiceTierSetting;
   progress: GcmProgress;
   signal?: AbortSignal;
+  /** Called while the model streams, throttled, to refresh the progress line. */
+  onTick?: () => void;
 };
 
 /**
@@ -273,7 +292,7 @@ async function askModel(ask: AskContext, systemPrompt: string, userText: string)
     },
     options,
   );
-  observeStream(stream, progress);
+  observeStream(stream, progress, ask.onTick);
 
   const message = await stream.result();
   const text = message.content
@@ -629,6 +648,7 @@ async function generateAndCommit(
       tier: serviceTier,
       progress,
       signal,
+      onTick: publish,
     };
 
     let plan: string[][];
