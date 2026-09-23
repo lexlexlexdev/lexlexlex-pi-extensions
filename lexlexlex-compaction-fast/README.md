@@ -65,18 +65,41 @@ MultiCodex applies.
 
 ## Indicator
 
-While a compaction of this extension runs, the spinner line names the model and the tier:
-`Compacting with openai-codex/gpt-6-luna (fast)... (esc to cancel)`. Pi builds that line —
-and its overflow/auto wording — inside its own indicator, which is not reachable from the
-extension UI context, so the extension wraps `Loader.updateDisplay()` from
-`@earendil-works/pi-tui`: that method reads `this.message` on every paint and the spinner
-repaints on its own interval. The wrapper only touches labels that start with
-`Compacting context`, `Auto-compacting`, or `Context overflow detected`, and only while a
-compaction of ours is in flight; everything else renders as Pi wrote it. Pi composes the
-first frames before this extension's hook runs, so they still read as Pi's plain text.
+While a compaction of this extension runs, the spinner line names the model, the tier, the
+output budget for the pass in flight, the tokens produced so far, and the elapsed time:
 
-This is the extension's only undocumented seam, and it is optional by construction:
-`pi update` replaces Pi's package (never this extension), and the seam is resolved when
+```
+⣷ Compacting with openai-codex/gpt-6-luna (fast)  [█░░░░░░░░░░░] ~1,000/8,192 tok · 18s
+```
+
+- The bar's ceiling is the real cap for the pass, taken from `options.maxTokens` on the
+  stream call (Pi uses `min(0.8 * reserveTokens, model.maxTokens)`, and `0.5 *
+  reserveTokens` for a turn-prefix summary) — so a nearly full bar means the summary is
+  close to being cut off by the token cap, which is a real failure mode.
+- Output tokens are **estimated** from delta length (4 characters per token) and marked
+  with `~`. As soon as the provider reports usage — mid-stream `partial.usage` or the
+  final message — the exact number replaces the estimate and the `~` disappears.
+- Elapsed time comes free: the label is rebuilt on every spinner repaint, so the
+  extension starts no timer of its own.
+- A second pass (a turn split or a retry) restarts the counters and appends `· pass 2`,
+  so a bar that jumps back to zero is explained rather than mysterious.
+
+Pi builds that line — and its overflow/auto wording — inside its own indicator, which is
+not reachable from the extension UI context, so the extension wraps
+`Loader.updateDisplay()` from `@earendil-works/pi-tui`: that method reads `this.message`
+on every paint and the spinner repaints on its own interval. The wrapper only touches
+labels that start with `Compacting context`, `Auto-compacting`, or
+`Context overflow detected`, and only while a compaction of ours is in flight; everything
+else renders as Pi wrote it. Pi composes the first frames before this extension's hook
+runs, so they still read as Pi's plain text.
+
+Progress is counted by overriding `push` on the one stream instance this extension hands
+to Pi. Pi consumes compaction streams through `stream.result()` rather than by iterating
+them, so the events cannot be tapped at the iterator; `push` still sees every event, and
+overriding it leaves completion, errors, aborts, and `result()` untouched.
+
+These are the extension's only undocumented seams, and they are optional by construction:
+`pi update` replaces Pi's package (never this extension), and the seams are resolved when
 the extension loads, so a renamed export, method, or label wording costs the label and
 nothing else — compaction keeps running on the configured model.
 
@@ -100,5 +123,6 @@ fake `pi.on`, and drive a manual compaction with `globalThis.fetch` stubbed:
 - an invalid tier warns in the UI and falls back to the standard tier
 - the stream is requested from `ctx.modelRegistry`, so a provider wrapper owns auth
 - `applyCodexFastCost` restates GPT-6 summary usage at 2.5x and GPT-5.4 at 2x
-- the compacting spinner names the model and appends `(fast)` for a fast tier, without
-  altering other loaders
+- the compacting spinner names the model, marks a fast tier with `(fast)`, and shows a
+  live output-token bar against the pass budget plus elapsed time, without altering other
+  loaders

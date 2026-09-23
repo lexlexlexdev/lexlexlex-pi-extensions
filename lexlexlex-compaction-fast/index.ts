@@ -28,7 +28,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { calculateCost, type Api, type Model } from "@earendil-works/pi-ai";
+import { calculateCost, type Api, type AssistantMessageEvent, type Model } from "@earendil-works/pi-ai";
 import * as piTui from "@earendil-works/pi-tui";
 
 export const COMPACTION_REASONS = ["manual", "threshold", "overflow"] as const;
@@ -146,10 +146,127 @@ type LoaderPrototype = {
   __compactionFastLabeling?: boolean;
 };
 
-let indicatorLabel: string | undefined;
+/**
+ * Live progress for the compaction in flight. Pi calls `stream.result()` on the
+ * summarization stream rather than iterating it, so the events cannot be tapped
+ * through the iterator; `push` is still called for every event, and overriding
+ * that one method on our own stream instance counts deltas without touching the
+ * stream's completion, error, abort, or `result()` behaviour.
+ *
+ * Output tokens are estimated from delta length (4 characters per token) until
+ * the provider reports real usage, which is why the estimate is shown with a
+ * leading `~`; the exact number replaces it as soon as usage arrives.
+ */
+export type CompactionProgress = {
+  descriptor: string;
+  /** Output budget for the current summarization pass, from Pi's maxTokens. */
+  budgetTokens?: number;
+  /** Characters seen in text/thinking deltas of the current pass. */
+  chars: number;
+  /** Output tokens the provider has actually reported for the current pass. */
+  reportedOutputTokens: number;
+  /** Summarization passes started (turn splits and retries start another). */
+  passes: number;
+  startedAt: number;
+};
 
-export function setCompactionIndicatorLabel(label: string | undefined): void {
-  indicatorLabel = label;
+const BAR_CELLS = 12;
+const BAR_FILLED = "█";
+const BAR_EMPTY = "░";
+const CHARS_PER_TOKEN = 4;
+
+let indicatorProgress: CompactionProgress | undefined;
+
+export function beginCompactionProgress(descriptor: string): void {
+  indicatorProgress = {
+    descriptor,
+    chars: 0,
+    reportedOutputTokens: 0,
+    passes: 0,
+    startedAt: Date.now(),
+  };
+}
+
+export function clearCompactionProgress(): void {
+  indicatorProgress = undefined;
+}
+
+/** Output tokens so far: what the provider reported, else a delta estimate. */
+export function compactionOutputTokens(progress: CompactionProgress): number {
+  return Math.max(progress.reportedOutputTokens, Math.ceil(progress.chars / CHARS_PER_TOKEN));
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+export function renderProgressBar(tokens: number, budget: number, cells = BAR_CELLS): string {
+  const ratio = budget > 0 ? Math.min(1, Math.max(0, tokens / budget)) : 0;
+  const filled = Math.round(ratio * cells);
+  return `${BAR_FILLED.repeat(filled)}${BAR_EMPTY.repeat(cells - filled)}`;
+}
+
+/** The `model (tier)  [bar] tokens/budget · elapsed` tail of the spinner line. */
+export function describeCompactionProgress(progress: CompactionProgress, now = Date.now()): string {
+  const tokens = compactionOutputTokens(progress);
+  const estimated = progress.reportedOutputTokens < tokens;
+  const budget = progress.budgetTokens;
+  const counter =
+    budget && budget > 0
+      ? `[${renderProgressBar(tokens, budget)}] ${estimated ? "~" : ""}${formatCount(tokens)}/${formatCount(budget)} tok`
+      : `${estimated ? "~" : ""}${formatCount(tokens)} tok`;
+  const pass = progress.passes > 1 ? ` · pass ${progress.passes}` : "";
+  return `${progress.descriptor}  ${counter} · ${formatDuration(now - progress.startedAt)}${pass}`;
+}
+
+/** Count one stream event towards the progress of the current pass. */
+export function noteCompactionStreamEvent(event: AssistantMessageEvent): void {
+  const progress = indicatorProgress;
+  if (!progress) return;
+
+  if (event.type === "text_delta" || event.type === "thinking_delta") {
+    progress.chars += event.delta.length;
+  }
+
+  // Delta events carry the in-flight message as `partial`; only the final
+  // `done`/`error` events carry it as `message`. Providers that report usage
+  // mid-stream (or at the end) land in the same field either way.
+  const carried = "partial" in event ? event.partial : "message" in event ? event.message : undefined;
+  const usage = isRecord(carried) && isRecord(carried.usage) ? carried.usage : undefined;
+  const output = usage?.output;
+  if (typeof output === "number" && Number.isFinite(output) && output > 0) {
+    progress.reportedOutputTokens = Math.max(progress.reportedOutputTokens, output);
+  }
+}
+
+/**
+ * Start counting a summarization pass. Pi hands the pass budget in
+ * `options.maxTokens` (0.8 of the reserve for a history summary, 0.5 for a turn
+ * prefix), so the bar's ceiling is the real cap rather than a guess.
+ */
+export function observeCompactionStream<T extends { push: (event: AssistantMessageEvent) => void }>(
+  stream: T,
+  budgetTokens?: number,
+): T {
+  const progress = indicatorProgress;
+  if (!progress || typeof stream.push !== "function") return stream;
+
+  progress.passes += 1;
+  progress.chars = 0;
+  progress.reportedOutputTokens = 0;
+  progress.budgetTokens = budgetTokens;
+
+  const originalPush = stream.push;
+  stream.push = function (this: T, event: AssistantMessageEvent) {
+    noteCompactionStreamEvent(event);
+    return originalPush.call(this, event);
+  };
+  return stream;
 }
 
 function resolveLoaderPrototype(): LoaderPrototype | undefined {
@@ -167,11 +284,11 @@ function isCompactionMessage(message: string): boolean {
   );
 }
 
-function describeCompactionMessage(message: string, descriptor: string): string {
+function describeCompactionMessage(message: string, detail: string): string {
   if (message.startsWith("Compacting context")) {
-    return message.replace("Compacting context", `Compacting with ${descriptor}`);
+    return message.replace("Compacting context", `Compacting with ${detail}`);
   }
-  return message.replace("Auto-compacting", `Auto-compacting with ${descriptor}`);
+  return message.replace("Auto-compacting", `Auto-compacting with ${detail}`);
 }
 
 export function installCompactionIndicatorLabeling(
@@ -183,12 +300,14 @@ export function installCompactionIndicatorLabeling(
 
   prototype.__compactionFastLabeling = true;
   prototype.updateDisplay = function (this: { message?: unknown }, ...args: unknown[]) {
-    const label = indicatorLabel;
+    const progress = indicatorProgress;
     const message = this.message;
-    if (!label || typeof message !== "string" || !isCompactionMessage(message)) {
+    if (!progress || typeof message !== "string" || !isCompactionMessage(message)) {
       return original.apply(this, args);
     }
-    this.message = describeCompactionMessage(message, label);
+    // Rebuilt on every paint, so the elapsed time and the bar follow the
+    // spinner's own repaint cadence instead of needing a timer of our own.
+    this.message = describeCompactionMessage(message, describeCompactionProgress(progress));
     try {
       return original.apply(this, args);
     } finally {
@@ -358,8 +477,12 @@ export function createCompactionStream(
   serviceTier?: ServiceTier,
 ): CompactStreamFn {
   return (model, context, options) => {
+    const budgetTokens = (options as { maxTokens?: number } | undefined)?.maxTokens;
     if (!serviceTier) {
-      return ctx.modelRegistry.streamSimple(model, context, options as RegistryStreamOptions);
+      return observeCompactionStream(
+        ctx.modelRegistry.streamSimple(model, context, options as RegistryStreamOptions),
+        budgetTokens,
+      );
     }
 
     const previousOnPayload = options?.onPayload;
@@ -370,7 +493,7 @@ export function createCompactionStream(
         return { ...base, service_tier: serviceTier };
       },
     } as RegistryStreamOptions;
-    return ctx.modelRegistry.streamSimple(model, context, requestOptions);
+    return observeCompactionStream(ctx.modelRegistry.streamSimple(model, context, requestOptions), budgetTokens);
   };
 }
 
@@ -477,12 +600,13 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
         ? requestServiceTier(config.serviceTier, model)
         : undefined;
 
-    // Label the spinner with what is actually about to run. Pi builds that line
-    // before this hook fires, so the first frames still read as Pi wrote them.
+    // Label the spinner with what is actually about to run, then let stream
+    // events fill in the bar and the token count. Pi builds that line before
+    // this hook fires, so the first frames still read as Pi wrote them.
     const descriptor = `${model.provider}/${model.id}${serviceTier ? " (fast)" : ""}`;
 
     try {
-      setCompactionIndicatorLabel(descriptor);
+      beginCompactionProgress(descriptor);
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       // Codex requests are authenticated by the provider at request time - a
       // wrapper such as MultiCodex rotates managed accounts and refreshes its
@@ -519,7 +643,7 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
       }
       return;
     } finally {
-      setCompactionIndicatorLabel(undefined);
+      clearCompactionProgress();
     }
   });
 }
