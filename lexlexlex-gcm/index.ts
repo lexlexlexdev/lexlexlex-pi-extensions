@@ -193,6 +193,17 @@ export function formatProgressDetail(progress: GcmProgress, now = Date.now()): s
   return `${progress.phase} · ${estimated}${formatCount(tokens)} tok · ${elapsed}`;
 }
 
+/**
+ * The two knobs that aren't the model name: tier and thinking level. Rendered
+ * as a trailing parenthetical so the header stays one glance long.
+ */
+function modelQualifiers(fast: boolean, thinking: ThinkingLevel | undefined, canThink = true): string {
+  const parts = [fast ? "fast" : undefined, thinking && canThink ? `thinking ${thinking}` : undefined].filter(
+    (part): part is string => Boolean(part),
+  );
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+}
+
 function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -635,12 +646,14 @@ async function generateAndCommit(
     modelSelected,
     serviceTier === "fast" && Boolean(choice) && supportsFastTier(choice!.model),
   );
-  const header = `gcm · ${modelSelected}${progress.fast ? " (fast)" : ""}`;
+  // Rebuilt on every publish: the tier and thinking level only settle once the
+  // target model is resolved, and both stay on screen after the run.
+  const header = () => `gcm · ${modelSelected}${modelQualifiers(progress.fast, choice?.thinkingLevel, choice?.model.reasoning)}`;
   const publish = () => {
-    setGcmWidget(ctx, header, formatProgressDetail(progress));
+    setGcmWidget(ctx, header(), formatProgressDetail(progress));
     onProgress?.(formatProgress(progress));
   };
-  const finishWidget = (detail: string) => setGcmWidget(ctx, header, detail);
+  const finishWidget = (detail: string) => setGcmWidget(ctx, header(), detail);
 
   try {
     if (!existsSync(repoPath)) {
@@ -886,7 +899,10 @@ export default function gcmExtension(pi: ExtensionAPI) {
       const suffix = parsed.branchName ? ` on ${parsed.branchName}` : "";
       const { serviceTier } = loadGcmConfig(ctx);
       const fast = serviceTier === "fast" && supportsFastTier(choice.model);
-      ctx.ui.notify(`Started /gcm (${choice.ref}${fast ? " fast" : ""})${customSuffix}${suffix}`, "info");
+      ctx.ui.notify(
+        `Started /gcm: ${choice.ref}${modelQualifiers(fast, choice.thinkingLevel, choice.model.reasoning)}${customSuffix}${suffix}`,
+        "info",
+      );
 
       // Live state lives in the widget (set inside generateAndCommit), so both
       // the command and the tool show the same thing.
