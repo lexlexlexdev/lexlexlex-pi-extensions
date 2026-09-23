@@ -29,7 +29,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { calculateCost, type Api, type Model } from "@earendil-works/pi-ai";
-import { Loader } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 
 export const COMPACTION_REASONS = ["manual", "threshold", "overflow"] as const;
 export type CompactionReason = (typeof COMPACTION_REASONS)[number];
@@ -135,9 +135,14 @@ function isRecord(value: unknown): value is UnknownRecord {
  * wrapping that one method is enough to relabel the indicator while it spins —
  * the spinner repaints on its own interval, so no extra render request is
  * needed. The wrapper is inert unless a compaction of ours is in flight.
+ *
+ * This is the extension's only undocumented seam: Pi may rename the export, the
+ * method, or the label wording. `pi update` replaces Pi's package, not this
+ * extension, and the lookup below runs at install time and tolerates a miss, so
+ * an update can only cost the label — it must never stop compaction itself.
  */
-const loaderPrototype = Loader.prototype as unknown as {
-  updateDisplay: (this: { message?: unknown }, ...args: unknown[]) => unknown;
+type LoaderPrototype = {
+  updateDisplay?: (this: { message?: unknown }, ...args: unknown[]) => unknown;
   __compactionFastLabeling?: boolean;
 };
 
@@ -145,6 +150,13 @@ let indicatorLabel: string | undefined;
 
 export function setCompactionIndicatorLabel(label: string | undefined): void {
   indicatorLabel = label;
+}
+
+function resolveLoaderPrototype(): LoaderPrototype | undefined {
+  const loader = (piTui as { Loader?: unknown }).Loader;
+  if (typeof loader !== "function") return undefined;
+  const prototype = (loader as { prototype?: unknown }).prototype;
+  return prototype && typeof prototype === "object" ? (prototype as LoaderPrototype) : undefined;
 }
 
 function isCompactionMessage(message: string): boolean {
@@ -162,13 +174,15 @@ function describeCompactionMessage(message: string, descriptor: string): string 
   return message.replace("Auto-compacting", `Auto-compacting with ${descriptor}`);
 }
 
-export function installCompactionIndicatorLabeling(): void {
-  if (loaderPrototype.__compactionFastLabeling) return;
-  const original = loaderPrototype.updateDisplay;
-  if (typeof original !== "function") return;
+export function installCompactionIndicatorLabeling(
+  prototype: LoaderPrototype | undefined = resolveLoaderPrototype(),
+): boolean {
+  if (!prototype || prototype.__compactionFastLabeling) return false;
+  const original = prototype.updateDisplay;
+  if (typeof original !== "function") return false;
 
-  loaderPrototype.__compactionFastLabeling = true;
-  loaderPrototype.updateDisplay = function (this: { message?: unknown }, ...args: unknown[]) {
+  prototype.__compactionFastLabeling = true;
+  prototype.updateDisplay = function (this: { message?: unknown }, ...args: unknown[]) {
     const label = indicatorLabel;
     const message = this.message;
     if (!label || typeof message !== "string" || !isCompactionMessage(message)) {
@@ -181,6 +195,7 @@ export function installCompactionIndicatorLabeling(): void {
       this.message = message;
     }
   };
+  return true;
 }
 
 /**

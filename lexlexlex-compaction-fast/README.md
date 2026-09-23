@@ -75,6 +75,11 @@ repaints on its own interval. The wrapper only touches labels that start with
 compaction of ours is in flight; everything else renders as Pi wrote it. Pi composes the
 first frames before this extension's hook runs, so they still read as Pi's plain text.
 
+This is the extension's only undocumented seam, and it is optional by construction:
+`pi update` replaces Pi's package (never this extension), and the seam is resolved when
+the extension loads, so a renamed export, method, or label wording costs the label and
+nothing else — compaction keeps running on the configured model.
+
 ## Failure visibility
 
 Notices go through `ctx.ui.notify()`, which Pi renders inside the transcript: warnings as
