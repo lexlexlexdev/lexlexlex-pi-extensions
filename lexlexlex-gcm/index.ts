@@ -154,7 +154,8 @@ export type GcmProgress = {
   ref: GcmModelRef;
   fast: boolean;
   phase: string;
-  startedAt: number;
+  /** Whole-run timer, for the final summary. */
+  beganAt: number;
   chars: number;
   reportedTokens: number;
   /** Last time a tick was published, for throttling (no timers involved). */
@@ -162,14 +163,13 @@ export type GcmProgress = {
 };
 
 export function beginProgress(ref: GcmModelRef, fast: boolean, phase = "starting"): GcmProgress {
-  return { ref, fast, phase, startedAt: Date.now(), chars: 0, reportedTokens: 0 };
+  return { ref, fast, phase, beganAt: Date.now(), chars: 0, reportedTokens: 0 };
 }
 
 export function setProgressPhase(progress: GcmProgress, phase: string): void {
   progress.phase = phase;
   progress.chars = 0;
   progress.reportedTokens = 0;
-  progress.startedAt = Date.now();
   progress.lastTickAt = undefined;
 }
 
@@ -182,13 +182,26 @@ function formatCount(value: number): string {
   return value.toLocaleString("en-US");
 }
 
-export function formatProgress(progress: GcmProgress, now = Date.now()): string {
-  const seconds = Math.max(0, Math.floor((now - progress.startedAt) / 1000));
-  const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+/**
+ * Formatting split: the widget line is phase · tokens · elapsed, the tool card
+ * line (and the footer status of `/gcm`) prefixes the model and tier.
+ */
+export function formatProgressDetail(progress: GcmProgress, now = Date.now()): string {
+  const elapsed = formatDuration(now - progress.beganAt);
   const tokens = progressTokens(progress);
   const estimated = progress.reportedTokens <= 0 && tokens > 0 ? "~" : "";
+  return `${progress.phase} · ${estimated}${formatCount(tokens)} tok · ${elapsed}`;
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+export function formatProgress(progress: GcmProgress, now = Date.now()): string {
   const tier = progress.fast ? " (fast)" : "";
-  return `${progress.ref}${tier} · ${progress.phase} · ${estimated}${formatCount(tokens)} tok · ${elapsed}`;
+  return `${progress.ref}${tier} · ${formatProgressDetail(progress, now)}`;
 }
 
 /**
@@ -534,6 +547,28 @@ async function commitStaged(repoPath: string, message: string): Promise<{ ok: tr
 type ProgressSink = (line: string) => void;
 
 /**
+ * Widget above the editor, so the run is visible even when the tool card is
+ * folded away by lexlexlex-tool-groups. Two lines: what is running (model and
+ * tier, which never change mid-run) and how far along it is.
+ */
+const WIDGET_KEY = "gcm";
+
+function setGcmWidget(ctx: ExtensionContext, header: string, detail?: string): void {
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget(WIDGET_KEY, detail ? [header, detail] : [header], { placement: "aboveEditor" });
+}
+
+function clearGcmWidget(ctx: ExtensionContext): void {
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget(WIDGET_KEY, undefined);
+}
+
+/** Elapsed time for the whole run, used by the final widget line. */
+function totalElapsed(progress: GcmProgress, now = Date.now()): string {
+  return formatDuration(now - progress.beganAt);
+}
+
+/**
  * Provider failures throw instead of returning a soft result: a commit run that
  * cannot reach the model means the provider is not answering, and the caller
  * decides how loudly to stop (the tool aborts the turn).
@@ -596,11 +631,20 @@ async function generateAndCommit(
     thinkingLevel: choice?.thinkingLevel,
     modelTried,
   };
-  const progress = beginProgress(modelSelected, serviceTier === "fast");
-  const publish = () => onProgress?.(formatProgress(progress));
+  const progress = beginProgress(
+    modelSelected,
+    serviceTier === "fast" && Boolean(choice) && supportsFastTier(choice!.model),
+  );
+  const header = `gcm · ${modelSelected}${progress.fast ? " (fast)" : ""}`;
+  const publish = () => {
+    setGcmWidget(ctx, header, formatProgressDetail(progress));
+    onProgress?.(formatProgress(progress));
+  };
+  const finishWidget = (detail: string) => setGcmWidget(ctx, header, detail);
 
   try {
     if (!existsSync(repoPath)) {
+      clearGcmWidget(ctx);
       const details = { ...baseDetails, errorCode: "path_missing" };
       return { ok: false, message: buildErrorMessage("Path does not exist.", details), details };
     }
@@ -608,12 +652,14 @@ async function generateAndCommit(
     try {
       await runGit(repoPath, ["rev-parse", "--is-inside-work-tree"]);
     } catch (e) {
+      clearGcmWidget(ctx);
       const details = { ...baseDetails, errorCode: "not_git_repo", debug: e instanceof Error ? e.message : "git check failed" };
       return { ok: false, message: buildErrorMessage("Invalid git repository path.", details), details };
     }
 
     const branchResult = await resolveBranch(repoPath, branchName);
     if (!branchResult.ok) {
+      clearGcmWidget(ctx);
       const details = { ...baseDetails, errorCode: branchResult.code, debug: branchResult.debug };
       return { ok: false, message: buildErrorMessage("Failed to prepare branch.", details), details };
     }
@@ -623,11 +669,13 @@ async function generateAndCommit(
 
     const files = await getAllChangedFiles(repoPath);
     if (files.length === 0) {
+      clearGcmWidget(ctx);
       const details = { ...baseDetails, errorCode: "no_changes", diffBytes: 0 };
       return { ok: false, message: buildErrorMessage("No changes found.", details), details };
     }
 
     if (!choice) {
+      clearGcmWidget(ctx);
       const details = { ...baseDetails, errorCode: "no_models_available" };
       return {
         ok: false,
@@ -662,6 +710,7 @@ async function generateAndCommit(
     for (const [index, group] of plan.entries()) {
       const staged = await stageFiles(repoPath, group);
       if (!staged.ok) {
+        finishWidget(`failed: ${staged.code} · ${totalElapsed(progress)}`);
         const details = { ...baseDetails, modelUsed: modelKey, errorCode: staged.code, debug: staged.debug, commits };
         return { ok: false, message: buildErrorMessage("Failed to stage files.", details), details };
       }
@@ -681,20 +730,24 @@ async function generateAndCommit(
       }
 
       if (!message) {
+        finishWidget(`failed: empty_response · ${totalElapsed(progress)}`);
         const details = { ...baseDetails, modelUsed: modelKey, errorCode: "empty_response", commits };
         return { ok: false, message: buildErrorMessage("Model returned empty text response.", details), details };
       }
 
       const committed = await commitStaged(repoPath, message);
       if (!committed.ok) {
+        finishWidget(`failed: ${committed.code} · ${totalElapsed(progress)}`);
         const details = { ...baseDetails, modelUsed: modelKey, errorCode: committed.code, debug: committed.debug, commits };
         return { ok: false, message: buildErrorMessage("git commit failed.", details), details };
       }
 
       commits.push({ branch: branchResult.branchUsed, message, hash: committed.hash, files: group });
+      publish();
     }
 
     if (commits.length === 0) {
+      clearGcmWidget(ctx);
       const details = { ...baseDetails, modelUsed: modelKey, errorCode: "no_commits_created" };
       return { ok: false, message: buildErrorMessage("No commits were created.", details), details };
     }
@@ -706,10 +759,14 @@ async function generateAndCommit(
       branchStatus: await getBranchStatus(repoPath),
       commits,
     };
+    finishWidget(`${commits.length} commit(s) · ${totalElapsed(progress)} · ${details.branchUsed ?? "unknown branch"}`);
     const summary = commits.map((c, i) => `${i + 1}. ${c.message} (${c.hash})`).join("\n");
     return { ok: true, message: summary, details };
   } catch (e) {
-    if (e instanceof GcmProviderError) throw e;
+    if (e instanceof GcmProviderError) {
+      finishWidget(`failed after ${totalElapsed(progress)} · see transcript`);
+      throw e;
+    }
     const details = { ...detailsForFailure(), errorCode: "unexpected_exception", debug: e instanceof Error ? e.message : "unknown" };
     return { ok: false, message: buildErrorMessage("Unexpected error.", details), details };
   }
@@ -831,19 +888,10 @@ export default function gcmExtension(pi: ExtensionAPI) {
       const fast = serviceTier === "fast" && supportsFastTier(choice.model);
       ctx.ui.notify(`Started /gcm (${choice.ref}${fast ? " fast" : ""})${customSuffix}${suffix}`, "info");
 
-      const statusKey = "gcm";
-      ctx.ui.setStatus(statusKey, `${choice.ref}${fast ? " fast" : ""} · starting`);
-
-      void generateAndCommit(
-        parsed.repoPath,
-        customInstructions || undefined,
-        parsed.branchName,
-        ctx,
-        undefined,
-        (line) => ctx.ui.setStatus(statusKey, line),
-      )
+      // Live state lives in the widget (set inside generateAndCommit), so both
+      // the command and the tool show the same thing.
+      void generateAndCommit(parsed.repoPath, customInstructions || undefined, parsed.branchName, ctx, undefined, undefined)
         .then((result) => {
-          ctx.ui.setStatus(statusKey, undefined);
           if (!result.ok) {
             ctx.ui.notify(result.message, "error");
             return;
@@ -866,7 +914,6 @@ export default function gcmExtension(pi: ExtensionAPI) {
           ctx.ui.notify(`Created ${result.details.commits?.length || 0} commit(s).`, "info");
         })
         .catch((e) => {
-          ctx.ui.setStatus(statusKey, undefined);
           const message = e instanceof Error ? e.message : "unknown";
           const hint = e instanceof GcmProviderError && e.hint ? `\n${e.hint}` : "";
           ctx.ui.notify(`[gcm] ${message}${hint}`, "error");
