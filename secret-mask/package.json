@@ -1,0 +1,13 @@
+{
+  "name": "secret-mask",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test --test-timeout=15000 test/*.test.ts"
+  }
+}
