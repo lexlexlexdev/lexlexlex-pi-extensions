@@ -16,6 +16,14 @@ Personal extensions for the [pi coding agent](https://github.com/earendil-works/
 | `pi-rtk-optimizer/` | Output rewrite/compaction tuning config. |
 | `pi-footer.json` | Live config for the `npm:pi-footer` statusline (footer lines, separators, presets) — pi-footer reads this exact path, `~/.pi/agent/extensions/pi-footer.json`, so the versioned copy is the one in use. Override with `PI_FOOTER_CONFIG`. |
 
+## Config snapshots
+
+The `configs/` folder versions the agent configuration these extensions run against: `settings.json`
+(`packages`, `compactionModel`, defaults), `models.json` (custom providers and the GPT-6 model
+definitions), `subagents.json` and `agents/*.md` for the subagent personas. They are copies, not
+symlinks — restore them over `~/.pi/agent/` after a clone. Credentials stay out of the repo. See
+[`configs/README.md`](./configs/README.md).
+
 ## Install
 
 Clone and point your pi settings at the folders/files, e.g. in `~/.pi/agent/settings.json`:

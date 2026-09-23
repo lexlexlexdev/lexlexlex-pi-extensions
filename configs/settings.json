@@ -1,0 +1,80 @@
+{
+  "compactionModel": {
+    "model": "openai/gpt-6-luna",
+    "thinkingLevel": "high",
+    "serviceTier": "priority"
+  },
+  "compaction": {
+    "keepRecentTokens": 30000,
+    "reserveTokens": 16384
+  },
+  "lastChangelogVersion": "0.87.1",
+  "defaultProvider": "commandcode",
+  "defaultModel": "deepseek/deepseek-v4.1-flash",
+  "theme": "macos-classic-light/github-dark-classic",
+  "defaultThinkingLevel": "high",
+  "showHardwareCursor": false,
+  "treeFilterMode": "no-tools",
+  "packages": [
+    "npm:pi-code-previews",
+    "npm:@juicesharp/rpiv-todo",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "~/.pi/agent/extensions/lexlexlex-gcm",
+    "~/.pi/agent/extensions/lexlexlex-permission-gates",
+    "~/.pi/agent/extensions/lexlexlex-sound-on-complete",
+    "npm:@narumitw/pi-retry",
+    "npm:pi-web-access",
+    "npm:pi-mcp-adapter",
+    "npm:pi-rtk-optimizer",
+    "https://github.com/gsanhueza/pi-token-speed",
+    "npm:@ff-labs/pi-fff",
+    "npm:pi-cache-optimizer",
+    "npm:pi-context-view",
+    "npm:pi-footer",
+    "extensions/lexlexlex-multicodex",
+    "npm:@tintinweb/pi-subagents",
+    "~/.pi/agent/extensions/lexlexlex-compaction-fast",
+    "npm:pi-caveman"
+  ],
+  "hideThinkingBlock": true,
+  "enabledModels": [
+    "commandcode/deepseek/deepseek-v4.1-flash",
+    "openai-codex/gpt-6-luna",
+    "openai-codex/gpt-6-sol"
+  ],
+  "transport": "auto",
+  "pi-multicodex": {
+    "usageMode": "raw",
+    "resetWindow": "both",
+    "showAccount": true,
+    "showReset": true,
+    "order": "account-first"
+  },
+  "terminal": {
+    "showTerminalProgress": false
+  },
+  "editorPaddingX": 0,
+  "enableInstallTelemetry": false,
+  "warnings": {
+    "anthropicExtraUsage": true
+  },
+  "showCacheMissNotices": false,
+  "tuiMode": "fullscreen",
+  "fullscreenExitOutput": "transcript",
+  "fullscreenScrollbar": "auto",
+  "tokenSpeed": {
+    "useProviderTokens": false,
+    "countStrategy": "estimate",
+    "endTpsBehavior": "average",
+    "display": "tps",
+    "icon": "⚡",
+    "updateInterval": 200,
+    "slidingWindow": 1000
+  },
+  "steeringMode": "all",
+  "followUpMode": "all",
+  "markdown": {
+    "mermaid": "final"
+  },
+  "fullscreenCopyOnSelect": true
+}
