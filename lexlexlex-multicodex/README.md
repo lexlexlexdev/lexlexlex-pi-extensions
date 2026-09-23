@@ -81,7 +81,7 @@ MultiCodex adds a live footer to your session showing the active account, 5-hour
 
 You can customize which fields appear and their ordering with `/multicodex footer`. The `raw` usage display shows the account alias followed by remaining quota as `alias · 5h:X%, W:Y%`, and the footer polls every five seconds. When Fast mode is enabled, a red `fast` marker appears after the usage elements.
 
-Use `/fast` to send supported official Codex requests with `service_tier: priority`. Fast mode is session-only, resets when you switch sessions, and is hidden when disabled. It applies to `gpt-5.4`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, and `gpt-5.6-terra` on the official ChatGPT Codex endpoint.
+Use `/fast` to send supported official Codex requests with `service_tier: priority`. Fast mode is session-only, resets when you switch sessions, and is hidden when disabled. It applies to `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`, and `gpt-5.4` on the official ChatGPT Codex endpoint. Fast requests bill 2.5x Standard credits for the GPT-6, GPT-5.6, and GPT-5.5 families and 2x for GPT-5.4, which the message hook mirrors when it corrects reported costs.
 
 ![MultiCodex footer settings](./assets/multicodex-footer-settings.png)
 
@@ -97,12 +97,12 @@ Use `/fast` to send supported official Codex requests with `service_tier: priori
 
 ## Local development
 
-This monorepo uses `bun` workspaces for dependency management.
+Dependencies are installed with `pnpm` (see `pnpm-lock.yaml`); the `check` script shells out to `bunx` when bun is available.
 
 ```bash
-cd /path/to/pi-packages
-bun install
-bun run --filter @carter-mcalister/pi-multicodex check
+cd ~/.pi/agent/extensions/lexlexlex-multicodex
+pnpm install
+./node_modules/.bin/vitest run -c vitest.config.ts   # tests only; `pnpm check` adds lint + typecheck
 npm pack --dry-run    # verify package contents
 ```
 

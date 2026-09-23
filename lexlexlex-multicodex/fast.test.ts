@@ -51,6 +51,9 @@ describe('Codex Fast eligibility and payloads', () => {
       'gpt-5.6-luna',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
+      'gpt-6-astra',
+      'gpt-6-luna',
+      'gpt-6-sol',
     ])
     for (const id of CODEX_FAST_MODEL_IDS) {
       expect(codexFastAvailability(createModel(id) as never, true)).toEqual({
@@ -263,5 +266,49 @@ describe('Codex Fast runtime', () => {
       true,
     ) as { usage: typeof gpt55Usage }
     expect(corrected55.usage.cost.total).toBe(gpt55Usage.cost.total * 2.5)
+
+    const luna6Usage = {
+      ...usage,
+      cost: {
+        input: 0.00001,
+        output: 0.00001,
+        cacheRead: 0.0000001,
+        cacheWrite: 0,
+        total: 0.0000201,
+      },
+    }
+    const correctedLuna6 = correctCodexFastMessageCost(
+      { ...message, model: 'gpt-6-luna', usage: luna6Usage },
+      createModel('gpt-6-luna', {
+        cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+      }) as never,
+      true,
+    ) as { usage: typeof luna6Usage }
+    expect(correctedLuna6.usage.cost.total).toBeCloseTo(
+      luna6Usage.cost.total * 2.5,
+      12,
+    )
+
+    const luna56Usage = {
+      ...usage,
+      cost: {
+        input: 0.00002,
+        output: 0.000024,
+        cacheRead: 0.0000002,
+        cacheWrite: 0,
+        total: 0.0000442,
+      },
+    }
+    const correctedLuna56 = correctCodexFastMessageCost(
+      { ...message, model: 'gpt-5.6-luna', usage: luna56Usage },
+      createModel('gpt-5.6-luna', {
+        cost: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0 },
+      }) as never,
+      true,
+    ) as { usage: typeof luna56Usage }
+    expect(correctedLuna56.usage.cost.total).toBeCloseTo(
+      luna56Usage.cost.total * 2.5,
+      12,
+    )
   })
 })

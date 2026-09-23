@@ -18,7 +18,36 @@ export const CODEX_FAST_MODEL_IDS: ReadonlySet<string> = new Set([
   'gpt-5.6-luna',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
+  'gpt-6-astra',
+  'gpt-6-luna',
+  'gpt-6-sol',
 ])
+
+/**
+ * Codex Fast credit multipliers per model, from
+ * https://learn.chatgpt.com/docs/agent-configuration/speed: GPT-6 Astra, Sol,
+ * and Luna consume credits at 2.5x the Standard rate, as do GPT-5.6 and
+ * GPT-5.5, while GPT-5.4 consumes 2x.
+ */
+export const CODEX_FAST_CREDIT_MULTIPLIERS: Readonly<Record<string, number>> = {
+  'gpt-5.4': 2,
+  'gpt-5.5': 2.5,
+  'gpt-5.6-luna': 2.5,
+  'gpt-5.6-sol': 2.5,
+  'gpt-5.6-terra': 2.5,
+  'gpt-6-astra': 2.5,
+  'gpt-6-luna': 2.5,
+  'gpt-6-sol': 2.5,
+}
+
+const DEFAULT_CODEX_FAST_CREDIT_MULTIPLIER = 2.5
+
+export function codexFastCreditMultiplier(modelId: string): number {
+  return (
+    CODEX_FAST_CREDIT_MULTIPLIERS[modelId] ??
+    DEFAULT_CODEX_FAST_CREDIT_MULTIPLIER
+  )
+}
 
 type MaybeModel = Model<Api> | undefined
 
@@ -128,7 +157,7 @@ export function correctCodexFastMessageCost(
 
   const correctedUsage = structuredClone(usage) as typeof usage
   calculateCost(model, correctedUsage as never)
-  const multiplier = model.id === 'gpt-5.5' ? 2.5 : 2
+  const multiplier = codexFastCreditMultiplier(model.id)
   const correctedCost = correctedUsage.cost as Record<string, number>
   for (const key of [
     'input',
