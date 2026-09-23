@@ -72,17 +72,25 @@ output budget for the pass in flight, the tokens produced so far, and the elapse
 ⣷ Compacting with openai-codex/gpt-6-luna (fast)  [█░░░░░░░░░░░] ~1,000/8,192 tok · 18s
 ```
 
-- The bar's ceiling is the real cap for the pass, taken from `options.maxTokens` on the
-  stream call (Pi uses `min(0.8 * reserveTokens, model.maxTokens)`, and `0.5 *
-  reserveTokens` for a turn-prefix summary) — so a nearly full bar means the summary is
-  close to being cut off by the token cap, which is a real failure mode.
+- The bar's ceiling is the budget for the pass in flight, taken from `options.maxTokens` on
+  the stream call: Pi uses `min(0.8 * reserveTokens, model.maxTokens)` for a history
+  summary and `0.5 * reserveTokens` for a turn-prefix summary. Note that the Codex
+  responses adapter never sends an output cap, so on `openai-codex/*` this is Pi's budget
+  target rather than a hard limit — the bar is a progress scale, not a truncation alarm.
 - Output tokens are **estimated** from delta length (4 characters per token) and marked
   with `~`. As soon as the provider reports usage — mid-stream `partial.usage` or the
-  final message — the exact number replaces the estimate and the `~` disappears.
+  final message — that number wins outright, even when it is smaller than the estimate.
+- Retries follow `settings.retry` the way Pi's own compaction does: the policy from the
+  settings manager is handed to `compact()`, and the countdown between attempts appears on
+  the same line (`· retry 1/3 in 2s`). Without that, a transient drop would silently fall
+  back to the active model instead of retrying the configured one.
 - Elapsed time comes free: the label is rebuilt on every spinner repaint, so the
   extension starts no timer of its own.
 - A second pass (a turn split or a retry) restarts the counters and appends `· pass 2`,
   so a bar that jumps back to zero is explained rather than mysterious.
+- A supported fast tier shows `(fast)`, `default` shows `(standard)`, and anything else
+  shows its own name. `fast` is translated to `priority` for the Codex and OpenAI
+  Responses APIs, where `fast` is not a wire value.
 
 Pi builds that line — and its overflow/auto wording — inside its own indicator, which is
 not reachable from the extension UI context, so the extension wraps

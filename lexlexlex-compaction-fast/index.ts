@@ -62,7 +62,13 @@ const SERVICE_TIER_APIS = new Set<string>([
 
 function supportsServiceTier(model: Model<Api>): boolean {
   if (!SERVICE_TIER_APIS.has(model.api)) return false;
-  return model.api === "openai-codex-responses" ? isOfficialCodexModel(model) : true;
+  // Only the ids the Fast programme advertises take the tier. An unlisted Codex
+  // model would fail the request rather than bill differently, so the endpoint
+  // check alone is not enough. Mirrors `isOfficialCodexModel` and
+  // `CODEX_FAST_MODEL_IDS` in `lexlexlex-multicodex/fast.ts`.
+  return model.api === "openai-codex-responses"
+    ? isOfficialCodexModel(model) && CODEX_FAST_MODEL_IDS.has(model.id)
+    : true;
 }
 
 /**
@@ -84,7 +90,19 @@ export function isOfficialCodexModel(model: Model<Api>): boolean {
  * Codex accounting in step, since its multiplier table only knows that value.
  */
 export function requestServiceTier(serviceTier: ServiceTier, model: Model<Api>): ServiceTier {
-  return serviceTier === "fast" && model.provider === "openai-codex" ? "priority" : serviceTier;
+  // `fast` is Pi/MultiCodex vocabulary, not an OpenAI wire value, and the
+  // request builders forward whatever they are given, so translate it where
+  // `priority` is the documented name.
+  const priorityIsWireValue =
+    model.api === "openai-codex-responses" || model.api === "openai-responses";
+  return serviceTier === "fast" && priorityIsWireValue ? "priority" : serviceTier;
+}
+
+/** Short tier label for the spinner line (`priority` and `fast` both mean Fast). */
+export function serviceTierBadge(serviceTier: ServiceTier): string {
+  if (serviceTier === "priority" || serviceTier === "fast") return "fast";
+  if (serviceTier === "default") return "standard";
+  return serviceTier;
 }
 
 export interface CompactionModelConfig {
@@ -92,6 +110,12 @@ export interface CompactionModelConfig {
   thinkingLevel?: ThinkingLevel;
   serviceTier?: ServiceTier;
   reasons: CompactionReason[];
+}
+
+/** The configured compaction route plus the retry policy Pi itself would use. */
+export interface LoadedCompactionConfig {
+  config: CompactionModelConfig;
+  retry: RetryPolicy;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -167,6 +191,8 @@ export type CompactionProgress = {
   reportedOutputTokens: number;
   /** Summarization passes started (turn splits and retries start another). */
   passes: number;
+  /** Backoff of a retry in flight, when Pi's retry policy scheduled one. */
+  retry?: { attempt: number; maxAttempts: number; delayMs: number; startedAt: number };
   startedAt: number;
 };
 
@@ -191,9 +217,20 @@ export function clearCompactionProgress(): void {
   indicatorProgress = undefined;
 }
 
+/** Record the backoff of a retry so the spinner can count it down. */
+export function setCompactionRetry(
+  retry: { attempt: number; maxAttempts: number; delayMs: number } | undefined,
+): void {
+  if (!indicatorProgress) return;
+  indicatorProgress.retry = retry ? { ...retry, startedAt: Date.now() } : undefined;
+}
+
 /** Output tokens so far: what the provider reported, else a delta estimate. */
 export function compactionOutputTokens(progress: CompactionProgress): number {
-  return Math.max(progress.reportedOutputTokens, Math.ceil(progress.chars / CHARS_PER_TOKEN));
+  // Reported usage is authoritative; the estimate only covers the window before
+  // the provider sends any, so it can never inflate a known number.
+  if (progress.reportedOutputTokens > 0) return progress.reportedOutputTokens;
+  return Math.ceil(progress.chars / CHARS_PER_TOKEN);
 }
 
 function formatCount(value: number): string {
@@ -214,14 +251,21 @@ export function renderProgressBar(tokens: number, budget: number, cells = BAR_CE
 /** The `model (tier)  [bar] tokens/budget · elapsed` tail of the spinner line. */
 export function describeCompactionProgress(progress: CompactionProgress, now = Date.now()): string {
   const tokens = compactionOutputTokens(progress);
-  const estimated = progress.reportedOutputTokens < tokens;
+  const estimated = progress.reportedOutputTokens <= 0 && tokens > 0;
   const budget = progress.budgetTokens;
   const counter =
     budget && budget > 0
       ? `[${renderProgressBar(tokens, budget)}] ${estimated ? "~" : ""}${formatCount(tokens)}/${formatCount(budget)} tok`
       : `${estimated ? "~" : ""}${formatCount(tokens)} tok`;
   const pass = progress.passes > 1 ? ` · pass ${progress.passes}` : "";
-  return `${progress.descriptor}  ${counter} · ${formatDuration(now - progress.startedAt)}${pass}`;
+  // Backoff between attempts would otherwise look like a stalled bar.
+  const retry = progress.retry
+    ? ` · retry ${progress.retry.attempt}/${progress.retry.maxAttempts} in ${Math.max(
+        0,
+        Math.ceil((progress.retry.startedAt + progress.retry.delayMs - now) / 1000),
+      )}s`
+    : "";
+  return `${progress.descriptor}  ${counter} · ${formatDuration(now - progress.startedAt)}${pass}${retry}`;
 }
 
 /** Count one stream event towards the progress of the current pass. */
@@ -410,16 +454,20 @@ export function resolveConfig(
   };
 }
 
-export function loadConfig(ctx: ExtensionContext): CompactionModelConfig | null {
+export function loadConfig(ctx: ExtensionContext): LoadedCompactionConfig | null {
   const settings = SettingsManager.create(ctx.cwd, getAgentDir(), {
     projectTrusted: ctx.isProjectTrusted(),
   });
 
-  return resolveConfig(
+  const config = resolveConfig(
     settings.getGlobalSettings(),
     ctx.isProjectTrusted() ? settings.getProjectSettings() : undefined,
     (message) => warn(ctx, message),
   );
+  // Pi's native compaction hands `settings.retry` to `compact()`, so a
+  // transient stream drop is retried on the configured model instead of
+  // silently falling back to the active one. Mirror that.
+  return config ? { config, retry: settings.getRetrySettings() } : null;
 }
 
 export function parseModelReference(reference: string): { provider: string; modelId: string } | null {
@@ -432,6 +480,7 @@ export function parseModelReference(reference: string): { provider: string; mode
 }
 
 type CompactStreamFn = NonNullable<Parameters<typeof compact>[7]>;
+type RetryPolicy = NonNullable<Parameters<typeof compact>[9]>;
 type RegistryStreamOptions = NonNullable<
   Parameters<ExtensionContext["modelRegistry"]["streamSimple"]>[2]
 >;
@@ -452,6 +501,11 @@ export const CODEX_FAST_CREDIT_MULTIPLIERS: Readonly<Record<string, number>> = {
   "gpt-6-luna": 2.5,
   "gpt-6-sol": 2.5,
 };
+
+/** The ids the Fast programme advertises, i.e. the ones that take the tier. */
+export const CODEX_FAST_MODEL_IDS: ReadonlySet<string> = new Set(
+  Object.keys(CODEX_FAST_CREDIT_MULTIPLIERS),
+);
 
 const DEFAULT_CODEX_FAST_CREDIT_MULTIPLIER = 2.5;
 
@@ -574,8 +628,10 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
   installCompactionIndicatorLabeling();
 
   pi.on("session_before_compact", async (event, ctx) => {
-    const config = loadConfig(ctx);
-    if (!config || !config.reasons.includes(event.reason)) return;
+    const loaded = loadConfig(ctx);
+    if (!loaded) return;
+    const { config, retry } = loaded;
+    if (!config.reasons.includes(event.reason)) return;
 
     const reference = parseModelReference(config.model);
     if (!reference) {
@@ -603,7 +659,18 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
     // Label the spinner with what is actually about to run, then let stream
     // events fill in the bar and the token count. Pi builds that line before
     // this hook fires, so the first frames still read as Pi wrote them.
-    const descriptor = `${model.provider}/${model.id}${serviceTier ? " (fast)" : ""}`;
+    const descriptor = `${model.provider}/${model.id}${
+      serviceTier ? ` (${serviceTierBadge(serviceTier)})` : ""
+    }`;
+    const retryCallbacks = retry.enabled
+      ? {
+          onRetryScheduled: (attempt: number, maxAttempts: number, delayMs: number) => {
+            setCompactionRetry({ attempt, maxAttempts, delayMs });
+          },
+          onRetryAttemptStart: () => setCompactionRetry(undefined),
+          onRetryFinished: () => setCompactionRetry(undefined),
+        }
+      : undefined;
 
     try {
       beginCompactionProgress(descriptor);
@@ -634,6 +701,8 @@ export default function compactionModelFast(pi: ExtensionAPI): void {
         config.thinkingLevel,
         createCompactionStream(ctx, serviceTier),
         auth.ok ? auth.env : undefined,
+        retry,
+        retryCallbacks,
       );
 
       return { compaction: applyCodexFastCost(model, result, serviceTier) };
