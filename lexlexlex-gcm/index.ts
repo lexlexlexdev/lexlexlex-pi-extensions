@@ -182,9 +182,14 @@ function formatCount(value: number): string {
   return value.toLocaleString("en-US");
 }
 
+/** Blink frames come off the wall clock: the widget repaints on stream ticks, so no timer of ours. */
+export function gcmPulse(now = Date.now()): string {
+  return Math.floor(now / 500) % 2 === 0 ? "◆" : "◇";
+}
+
 /**
- * Formatting split: the widget line is phase · tokens · elapsed, the tool card
- * line (and the footer status of `/gcm`) prefixes the model and tier.
+ * Formatting split: the widget's second line is phase · tokens · elapsed, the
+ * tool card line prefixes the model, tier and thinking level.
  */
 export function formatProgressDetail(progress: GcmProgress, now = Date.now()): string {
   const elapsed = formatDuration(now - progress.beganAt);
@@ -259,6 +264,8 @@ export class GcmProviderError extends Error {
     readonly hint?: string,
     /** The provider's own reason, carried through from the model layer. */
     readonly debug?: string,
+    /** Structured outcome, so the caller can post the same report as a success. */
+    readonly details?: GcmDetails,
   ) {
     super(message);
     this.name = "GcmProviderError";
@@ -316,7 +323,7 @@ async function askModel(ask: AskContext, systemPrompt: string, userText: string)
     },
     options,
   );
-  observeStream(stream, progress, ask.onTick);
+  observeStream(stream, progress, ask.onTick, 500);
 
   const message = await stream.result();
   const text = message.content
@@ -398,6 +405,8 @@ type GcmDetails = {
   progress?: string;
   modelTried: string[];
   diffBytes?: number;
+  /** Whole-run duration, reported in chat once the widget is cleared. */
+  elapsedMs?: number;
   errorCode?: string;
   debug?: string;
 };
@@ -574,9 +583,47 @@ function clearGcmWidget(ctx: ExtensionContext): void {
   ctx.ui.setWidget(WIDGET_KEY, undefined);
 }
 
-/** Elapsed time for the whole run, used by the final widget line. */
-function totalElapsed(progress: GcmProgress, now = Date.now()): string {
-  return formatDuration(now - progress.beganAt);
+/**
+ * Durable transcript entry for a finished run, whether it committed or failed.
+ * Reports are entries, not notices, so they survive the redraw that follows and
+ * stay readable after the widget above the editor has been cleared.
+ */
+function sendGcmReport(pi: ExtensionAPI, details: GcmDetails): void {
+  pi.sendMessage({
+    customType: GCM_REPORT_TYPE,
+    content: "gcm report",
+    details: {
+      repoName: details.repoName,
+      branchUsed: details.branchUsed,
+      branchStatus: details.branchStatus,
+      commits: details.commits || [],
+      model: details.modelUsed ?? details.modelSelected,
+      fast: details.fast,
+      thinking: details.thinkingLevel,
+      elapsedMs: details.elapsedMs,
+      errorCode: details.errorCode,
+    },
+    display: true,
+  });
+}
+
+/**
+ * Runs a commit pass and always clears the widget: the outcome belongs in the
+ * transcript (the report entry), not left sitting above the editor.
+ */
+async function generateAndCommit(
+  repoPathRaw: string,
+  customInstructions: string | undefined,
+  branchName: string | undefined,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+  onProgress: ProgressSink | undefined,
+): Promise<GcmResult> {
+  try {
+    return await runGcm(repoPathRaw, customInstructions, branchName, ctx, signal, onProgress);
+  } finally {
+    clearGcmWidget(ctx);
+  }
 }
 
 /**
@@ -605,6 +652,7 @@ function providerFailure(
     errorCode: "model_request_failed",
     debug,
     commits,
+    elapsedMs: Date.now() - progress.beganAt,
   };
   const warning =
     commits.length > 0
@@ -614,10 +662,11 @@ function providerFailure(
     buildErrorMessage("Model request failed.", details),
     warning,
     cause instanceof GcmProviderError ? cause.debug : undefined,
+    details,
   );
 }
 
-async function generateAndCommit(
+async function runGcm(
   repoPathRaw: string,
   customInstructions: string | undefined,
   branchName: string | undefined,
@@ -648,12 +697,11 @@ async function generateAndCommit(
   );
   // Rebuilt on every publish: the tier and thinking level only settle once the
   // target model is resolved, and both stay on screen after the run.
-  const header = () => `gcm · ${modelSelected}${modelQualifiers(progress.fast, choice?.thinkingLevel, choice?.model.reasoning)}`;
+  const header = () => `${gcmPulse()} gcm · ${modelSelected}${modelQualifiers(progress.fast, choice?.thinkingLevel, choice?.model.reasoning)}`;
   const publish = () => {
     setGcmWidget(ctx, header(), formatProgressDetail(progress));
     onProgress?.(formatProgress(progress));
   };
-  const finishWidget = (detail: string) => setGcmWidget(ctx, header(), detail);
 
   try {
     if (!existsSync(repoPath)) {
@@ -723,8 +771,7 @@ async function generateAndCommit(
     for (const [index, group] of plan.entries()) {
       const staged = await stageFiles(repoPath, group);
       if (!staged.ok) {
-        finishWidget(`failed: ${staged.code} · ${totalElapsed(progress)}`);
-        const details = { ...baseDetails, modelUsed: modelKey, errorCode: staged.code, debug: staged.debug, commits };
+        const details = { ...baseDetails, modelUsed: modelKey, errorCode: staged.code, debug: staged.debug, commits, elapsedMs: Date.now() - progress.beganAt };
         return { ok: false, message: buildErrorMessage("Failed to stage files.", details), details };
       }
 
@@ -743,15 +790,13 @@ async function generateAndCommit(
       }
 
       if (!message) {
-        finishWidget(`failed: empty_response · ${totalElapsed(progress)}`);
-        const details = { ...baseDetails, modelUsed: modelKey, errorCode: "empty_response", commits };
+        const details = { ...baseDetails, modelUsed: modelKey, errorCode: "empty_response", commits, elapsedMs: Date.now() - progress.beganAt };
         return { ok: false, message: buildErrorMessage("Model returned empty text response.", details), details };
       }
 
       const committed = await commitStaged(repoPath, message);
       if (!committed.ok) {
-        finishWidget(`failed: ${committed.code} · ${totalElapsed(progress)}`);
-        const details = { ...baseDetails, modelUsed: modelKey, errorCode: committed.code, debug: committed.debug, commits };
+        const details = { ...baseDetails, modelUsed: modelKey, errorCode: committed.code, debug: committed.debug, commits, elapsedMs: Date.now() - progress.beganAt };
         return { ok: false, message: buildErrorMessage("git commit failed.", details), details };
       }
 
@@ -760,8 +805,7 @@ async function generateAndCommit(
     }
 
     if (commits.length === 0) {
-      clearGcmWidget(ctx);
-      const details = { ...baseDetails, modelUsed: modelKey, errorCode: "no_commits_created" };
+      const details = { ...baseDetails, modelUsed: modelKey, errorCode: "no_commits_created", elapsedMs: Date.now() - progress.beganAt };
       return { ok: false, message: buildErrorMessage("No commits were created.", details), details };
     }
 
@@ -771,15 +815,12 @@ async function generateAndCommit(
       fast: progress.fast,
       branchStatus: await getBranchStatus(repoPath),
       commits,
+      elapsedMs: Date.now() - progress.beganAt,
     };
-    finishWidget(`${commits.length} commit(s) · ${totalElapsed(progress)} · ${details.branchUsed ?? "unknown branch"}`);
     const summary = commits.map((c, i) => `${i + 1}. ${c.message} (${c.hash})`).join("\n");
     return { ok: true, message: summary, details };
   } catch (e) {
-    if (e instanceof GcmProviderError) {
-      finishWidget(`failed after ${totalElapsed(progress)} · see transcript`);
-      throw e;
-    }
+    if (e instanceof GcmProviderError) throw e;
     const details = { ...detailsForFailure(), errorCode: "unexpected_exception", debug: e instanceof Error ? e.message : "unknown" };
     return { ok: false, message: buildErrorMessage("Unexpected error.", details), details };
   }
@@ -788,17 +829,38 @@ async function generateAndCommit(
 export default function gcmExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer(GCM_REPORT_TYPE, (message, _options, theme) => {
     const details = message.details as
-      | { repoName?: string; branchUsed?: string; branchStatus?: string; commits?: CommitItem[]; model?: string; fast?: boolean }
+      | {
+          repoName?: string;
+          branchUsed?: string;
+          branchStatus?: string;
+          commits?: CommitItem[];
+          model?: string;
+          fast?: boolean;
+          thinking?: string;
+          elapsedMs?: number;
+          errorCode?: string;
+        }
       | undefined;
     const commits = details?.commits || [];
 
     let out = theme.fg("accent", theme.bold("GCM Report"));
-    if (details?.model) out += `\n${theme.fg("dim", "model:")} ${theme.fg("text", `${details.model}${details.fast ? " fast" : ""}`)}`;
+    if (details?.model) {
+      const knobs = [details.fast ? "fast" : undefined, details.thinking ? `thinking ${details.thinking}` : undefined].filter(
+        (part): part is string => Boolean(part),
+      );
+      out += `\n${theme.fg("dim", "model:")} ${theme.fg("text", `${details.model}${knobs.length > 0 ? ` (${knobs.join(", ")})` : ""}`)}`;
+    }
     if (details?.repoName) out += `\n${theme.fg("dim", "repo:")} ${theme.fg("text", details.repoName)}`;
     if (details?.branchUsed) out += `\n${theme.fg("dim", "branch:")} ${theme.fg("text", details.branchUsed)}`;
     if (details?.branchStatus) out += `\n${theme.fg("dim", "status:")} ${theme.fg("text", details.branchStatus)}`;
+    if (typeof details?.elapsedMs === "number") {
+      out += `\n${theme.fg("dim", "took:")} ${theme.fg("text", formatDuration(details.elapsedMs))}`;
+    }
+    if (details?.errorCode) {
+      out += `\n${theme.fg("dim", "failed:")} ${theme.fg("error", details.errorCode)}`;
+    }
     if (commits.length === 0) {
-      out += `\n${theme.fg("dim", "No commits to report")}`;
+      out += `\n${theme.fg("dim", details?.errorCode ? "No commits were created" : "No commits to report")}`;
       return new Text(out, 0, 0);
     }
 
@@ -835,12 +897,14 @@ export default function gcmExtension(pi: ExtensionAPI) {
             });
           },
         );
+        sendGcmReport(pi, result.details);
         return { content: [{ type: "text", text: result.message }], details: result.details, isError: !result.ok };
       } catch (e) {
-        // A provider failure is bigger than one commit run: report it in the
-        // transcript, stop the turn, and let Pi render the tool as failed.
+        // A provider failure is bigger than one commit run: post the same report
+        // the success path posts, stop the turn, and let Pi render the tool failed.
         const message = e instanceof Error ? e.message : "gcm failed";
         const hint = e instanceof GcmProviderError && e.hint ? `\n${e.hint}` : "";
+        if (e instanceof GcmProviderError && e.details) sendGcmReport(pi, e.details);
         ctx.ui.notify(`[gcm] ${message}${hint}`, "error");
         ctx.abort();
         throw e instanceof Error ? e : new Error(message);
@@ -913,23 +977,11 @@ export default function gcmExtension(pi: ExtensionAPI) {
             return;
           }
 
-          pi.sendMessage({
-            customType: GCM_REPORT_TYPE,
-            content: "gcm report",
-            details: {
-              repoName: result.details.repoName,
-              branchUsed: result.details.branchUsed,
-              branchStatus: result.details.branchStatus,
-              commits: result.details.commits || [],
-              model: result.details.modelUsed ?? result.details.modelSelected,
-              fast: result.details.fast,
-            },
-            display: true,
-          });
-
+          sendGcmReport(pi, result.details);
           ctx.ui.notify(`Created ${result.details.commits?.length || 0} commit(s).`, "info");
         })
         .catch((e) => {
+          if (e instanceof GcmProviderError && e.details) sendGcmReport(pi, e.details);
           const message = e instanceof Error ? e.message : "unknown";
           const hint = e instanceof GcmProviderError && e.hint ? `\n${e.hint}` : "";
           ctx.ui.notify(`[gcm] ${message}${hint}`, "error");
